@@ -15,13 +15,22 @@ from db_perf_toolkit.backends.base import Backend, CheckUnavailable
 from db_perf_toolkit.models import (
     BloatedTable,
     BlockingChain,
+    Operation,
+    Plan,
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
     UnusedIndex,
 )
+from db_perf_toolkit.safety import index_drop_refusal
 
 APPLICATION_NAME = "db-perf-toolkit"
+
+#: Ola Hallengren's IndexOptimize defaults to @MinNumberOfPages = 1000 before
+#: touching an index, on the reasoning that maintenance on a tiny object costs
+#: more than it returns. 1000 PostgreSQL pages is 8MB, and the same logic
+#: applies to dropping: reclaiming 16KB is not worth a schema change.
+DEFAULT_MIN_INDEX_BYTES = 8 * 1024 * 1024
 
 #: pg_stat_statements renamed its timing columns in PostgreSQL 13:
 #: total_time -> total_exec_time, mean_time -> mean_exec_time. Querying the
@@ -32,9 +41,20 @@ _PGSS_RENAME_VERSION = 13
 class PostgresBackend(Backend):
     engine = "PostgreSQL"
 
-    def __init__(self, conn: psycopg.Connection[dict[str, object]]) -> None:
+    def __init__(
+        self, conn: psycopg.Connection[dict[str, object]], *, read_only: bool = True
+    ) -> None:
         self._conn = conn
         self._server_version_num = conn.info.server_version
+        self.read_only = read_only
+
+    @property
+    def database(self) -> str:
+        return self._conn.info.dbname
+
+    @property
+    def host(self) -> str | None:
+        return self._conn.info.host or None
 
     @property
     def _major(self) -> int:
@@ -120,6 +140,7 @@ class PostgresBackend(Backend):
             cur.execute(
                 """
                 SELECT
+                    schemaname                                AS schema_name,
                     relname                                   AS table_name,
                     seq_scan                                  AS seq_scans,
                     COALESCE(idx_scan, 0)                     AS index_scans,
@@ -139,6 +160,7 @@ class PostgresBackend(Backend):
 
         return [
             SeqScanHotspot(
+                schema=str(row["schema_name"]),
                 table=str(row["table_name"]),
                 seq_scans=int(row["seq_scans"]),  # type: ignore[call-overload]
                 index_scans=int(row["index_scans"]),  # type: ignore[call-overload]
@@ -155,6 +177,7 @@ class PostgresBackend(Backend):
             cur.execute(
                 """
                 SELECT
+                    s.schemaname                           AS schema_name,
                     s.relname                              AS table_name,
                     s.indexrelname                         AS index_name,
                     s.idx_scan                             AS scans,
@@ -179,6 +202,7 @@ class PostgresBackend(Backend):
 
         return [
             UnusedIndex(
+                schema=str(row["schema_name"]),
                 table=str(row["table_name"]),
                 index=str(row["index_name"]),
                 scans=int(row["scans"]),  # type: ignore[call-overload]
@@ -196,6 +220,7 @@ class PostgresBackend(Backend):
             cur.execute(
                 """
                 SELECT
+                    schemaname  AS schema_name,
                     relname     AS table_name,
                     n_live_tup  AS live_rows,
                     n_dead_tup  AS dead_rows,
@@ -214,6 +239,7 @@ class PostgresBackend(Backend):
 
         return [
             BloatedTable(
+                schema=str(row["schema_name"]),
                 table=str(row["table_name"]),
                 live_rows=int(row["live_rows"]),  # type: ignore[call-overload]
                 dead_rows=int(row["dead_rows"]),  # type: ignore[call-overload]
@@ -264,17 +290,150 @@ class PostgresBackend(Backend):
             for row in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Maintenance planning
+    #
+    # Planning never touches the server. Every command below is built as an
+    # Operation and returned; execute() is the only thing that runs anything,
+    # so --script and --dry-run share one code path with --execute rather
+    # than reimplementing the SQL twice and drifting apart.
+    # ------------------------------------------------------------------
+
+    def _render(self, statement: sql.Composed | sql.SQL) -> str:
+        return statement.as_string(self._conn)
+
+    def plan_vacuum(self, tables: list[BloatedTable], *, analyze: bool = True) -> Plan:
+        plan = Plan(engine=self.engine, database=self.database)
+        verb = sql.SQL("VACUUM (ANALYZE)") if analyze else sql.SQL("VACUUM")
+        for t in tables:
+            target = f"{t.schema}.{t.table}"
+            plan.operations.append(
+                Operation(
+                    target=target,
+                    description=f"{t.dead_pct:.1f}% dead tuples ({t.dead_rows:,} rows)",
+                    sql=self._render(sql.SQL("{} {};").format(verb, _qualified(t.schema, t.table))),
+                    destructive=False,
+                )
+            )
+        return plan
+
+    def plan_reindex(self, indexes: list[UnusedIndex]) -> Plan:
+        """Rebuild indexes in place.
+
+        CONCURRENTLY avoids taking a lock that blocks writes for the duration,
+        which is the difference between a maintenance window and an outage. It
+        requires PostgreSQL 12+.
+        """
+        plan = Plan(engine=self.engine, database=self.database)
+        concurrent = self._major >= 12
+        if not concurrent:
+            plan.refused["*"] = (
+                f"REINDEX CONCURRENTLY requires PostgreSQL 12+ (server is {self._major}). "
+                "A plain REINDEX locks out writes for the duration."
+            )
+            return plan
+
+        for idx in indexes:
+            plan.operations.append(
+                Operation(
+                    target=f"{idx.schema}.{idx.index}",
+                    description=f"rebuild {idx.size_pretty} index on {idx.table}",
+                    sql=self._render(
+                        sql.SQL("REINDEX INDEX CONCURRENTLY {};").format(
+                            _qualified(idx.schema, idx.index)
+                        )
+                    ),
+                    destructive=False,
+                )
+            )
+        return plan
+
+    def plan_drop_unused_indexes(
+        self,
+        indexes: list[UnusedIndex],
+        *,
+        min_size_bytes: int = DEFAULT_MIN_INDEX_BYTES,
+    ) -> Plan:
+        """Drop indexes confirmed unused, refusing anything load-bearing.
+
+        Each operation carries the index's own CREATE statement as rollback,
+        captured from pg_get_indexdef before anything is dropped.
+        """
+        plan = Plan(engine=self.engine, database=self.database)
+
+        for idx in indexes:
+            target = f"{idx.schema}.{idx.index}"
+
+            refusal = index_drop_refusal(idx)
+            if refusal is not None:
+                plan.refused[target] = refusal
+                continue
+
+            if idx.size_bytes < min_size_bytes:
+                plan.refused[target] = (
+                    f"only {idx.size_pretty} — below the {min_size_bytes // 1024 // 1024}MB "
+                    "floor, so dropping it buys nothing"
+                )
+                continue
+
+            plan.operations.append(
+                Operation(
+                    target=target,
+                    description=f"{idx.size_pretty}, {idx.scans} scans, on {idx.table}",
+                    sql=self._render(
+                        sql.SQL("DROP INDEX CONCURRENTLY {};").format(
+                            _qualified(idx.schema, idx.index)
+                        )
+                    ),
+                    destructive=True,
+                    # pg_get_indexdef output, so the rebuild is exact.
+                    rollback_sql=idx.definition.rstrip(";") + ";",
+                )
+            )
+        return plan
+
+    def execute(self, operations: list[Operation]) -> list[tuple[Operation, str | None]]:
+        """Run operations, returning (operation, error) for each.
+
+        One failure does not abort the rest: a partially applied maintenance
+        run is normal, and the manifest already records how to undo whatever
+        did land.
+        """
+        if self.read_only:
+            raise RuntimeError(
+                "This backend is read-only. Reconnect with read_only=False to execute."
+            )
+
+        results: list[tuple[Operation, str | None]] = []
+        for op in operations:
+            try:
+                self._conn.execute(op.sql)  # type: ignore[arg-type]
+                results.append((op, None))
+            except psycopg.Error as exc:
+                results.append((op, str(exc).strip()))
+        return results
+
 
 def _squash(text: str) -> str:
     """Collapse whitespace so multi-line SQL fits a terminal row."""
     return " ".join(text.split())
 
 
+def _qualified(schema: str, name: str) -> sql.Composed:
+    return sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(name))
+
+
 def _opt_str(value: object) -> str | None:
     return None if value is None else str(value)
 
 
-def connect(dsn: str, *, connect_timeout: int = 10) -> PostgresBackend:
+def connect(
+    dsn: str,
+    *,
+    connect_timeout: int = 10,
+    read_only: bool = True,
+    statement_timeout_ms: int = 30_000,
+) -> PostgresBackend:
     """Open a connection the server itself will refuse writes on.
 
     This tool is pointed at production databases, so read-only must be
@@ -297,6 +456,19 @@ def connect(dsn: str, *, connect_timeout: int = 10) -> PostgresBackend:
         application_name=APPLICATION_NAME,
         row_factory=dict_row,
     )
-    conn.read_only = True
-    conn.execute("SET SESSION default_transaction_read_only = on")
-    return PostgresBackend(conn)
+
+    # A diagnostic tool must never be the thing that pages someone. Catalog
+    # queries over a large schema — pg_total_relation_size especially — can be
+    # slow, so every statement is bounded.
+    # set_config() rather than SET: SET takes no bind parameters, so it would
+    # mean interpolating into SQL text.
+    conn.execute(
+        "SELECT set_config('statement_timeout', %s, false)",
+        (str(int(statement_timeout_ms)),),
+    )
+
+    if read_only:
+        conn.read_only = True
+        conn.execute("SET SESSION default_transaction_read_only = on")
+
+    return PostgresBackend(conn, read_only=read_only)

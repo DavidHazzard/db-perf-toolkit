@@ -32,6 +32,7 @@ class SeqScanHotspot:
     the tool cannot back up.
     """
 
+    schema: str
     table: str
     seq_scans: int
     index_scans: int
@@ -43,6 +44,7 @@ class SeqScanHotspot:
 
 @dataclass(frozen=True, slots=True)
 class UnusedIndex:
+    schema: str
     table: str
     index: str
     scans: int
@@ -60,6 +62,7 @@ class UnusedIndex:
 
 @dataclass(frozen=True, slots=True)
 class BloatedTable:
+    schema: str
     table: str
     live_rows: int
     dead_rows: int
@@ -92,6 +95,45 @@ class StatsWindow:
 
     stats_reset: datetime | None
     server_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class Operation:
+    """One maintenance action, planned but not yet run.
+
+    Planning and execution are separated so `--script`, `--dry-run` and
+    `--execute` all consume the same objects. It is also what lets the
+    SQL Server backend orchestrate Ola Hallengren's procedures through the
+    identical pipeline — there the `sql` is an EXEC of IndexOptimize rather
+    than DDL of our own.
+    """
+
+    target: str
+    description: str
+    sql: str
+    destructive: bool
+    """SQL that undoes this operation, where an undo exists.
+
+    For a dropped index this is its full CREATE statement, captured from
+    pg_get_indexdef *before* the drop. Without it, "we deleted the index and
+    you can work out how to rebuild it" is not a recoverable position.
+    """
+    rollback_sql: str | None = None
+
+
+@dataclass(slots=True)
+class Plan:
+    """A set of operations plus why each one is or is not included."""
+
+    engine: str
+    database: str
+    operations: list[Operation] = field(default_factory=list)
+    """Candidates deliberately excluded, mapped to the reason."""
+    refused: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def destructive_operations(self) -> list[Operation]:
+        return [op for op in self.operations if op.destructive]
 
 
 @dataclass(slots=True)

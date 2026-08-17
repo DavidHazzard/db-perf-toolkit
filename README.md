@@ -1,6 +1,6 @@
 # db-perf-toolkit
 
-Point it at a PostgreSQL database and it surfaces slow queries, unused indexes, table bloat, sequential-scan hotspots, and lock contention. A lightweight, read-only alternative to expensive DBA tooling.
+Point it at a PostgreSQL database and it surfaces slow queries, unused indexes, table bloat, sequential-scan hotspots, and lock contention — then, if you ask it to, fixes what it safely can. Read-only by default; every destructive change is previewed, guarded, and reversible.
 
 ```console
 $ dbperf --dsn postgresql://user@host/shop report
@@ -46,19 +46,51 @@ Tables with a high dead tuple ratio
 blocking: nothing found
 ```
 
-## It cannot write to your database
+## Read-only by default; writes are opt-in and reversible
 
-This is designed to be pointed at production, so read-only is enforced by the server rather than by the discipline of the queries:
+Diagnosis never writes. The connection is read-only **at the server**, not by the discipline of the queries:
 
 ```sql
 SET SESSION default_transaction_read_only = on
 ```
 
-Every statement runs inside a read-only transaction. A bug in a catalog query cannot become a write.
-
 That specific line matters. psycopg's `Connection.read_only` attribute governs only transactions the driver opens itself, and in autocommit mode it opens none — so the attribute is silently inert and writes succeed. The integration suite asserts a `CREATE TABLE` is actually rejected, which is how that was caught.
 
-Connections also set `application_name=db-perf-toolkit`, so the tool is identifiable in `pg_stat_activity` to whoever is watching the server.
+Maintenance commands (`vacuum`, `reindex`, `drop-unused-indexes`) are the only ones that can write, and they open a **separate** connection to do it. The rules:
+
+- **Dry run is the default.** Nothing runs without `--execute`. This is the inverse of Ola Hallengren's `@Execute='Y'` default, which is a reasonable choice for a solution with fifteen years of hardening behind it and not for this one.
+- **Every destructive run writes a rollback manifest first**, to local disk, before touching anything. A drop records its own `CREATE INDEX` statement — taken from `pg_get_indexdef` — so `restore-indexes` can put it back. An interrupted run is still recoverable.
+- **Destructive operations require typing the database name.** `--yes` skips it for automation.
+- **`--script` never connects for writes at all**, emitting SQL for a human to review.
+
+Every statement is bounded by `statement_timeout` (default 30s). A diagnostic tool should never be the thing that pages someone. Connections set `application_name=db-perf-toolkit` so the tool is identifiable in `pg_stat_activity`.
+
+### What it refuses to drop
+
+| Refused | Why |
+|---|---|
+| Primary keys | Excluded from the query entirely |
+| Constraint-backed indexes | Dropping changes what the table accepts |
+| Unique indexes | Enforce uniqueness even with no `pg_constraint` row |
+| Indexes with any recorded scans | Not unused |
+| Indexes below 8MB | Below the floor, so the change buys nothing |
+| Anything, if statistics were reset < 7 days ago | The window is too short to call an index unused |
+
+That last one is the guard people skip. Counters are cumulative since the last reset, so an index serving a monthly report looks untouched for 29 days out of 30. Override with `--min-stats-age-days`.
+
+## Relationship to Ola Hallengren's Maintenance Solution
+
+[Ola Hallengren's SQL Server Maintenance Solution](https://ola.hallengren.com/) (MIT) is the de-facto standard for SQL Server maintenance. This tool does not compete with it and does not vendor it.
+
+**Borrowed as design, reimplemented for PostgreSQL:**
+
+- `@Execute='N'` → `--script`, emitting reviewable SQL instead of running it
+- `@MinNumberOfPages = 1000` → the 8MB index floor; 1000 PostgreSQL pages is 8MB, and the reasoning carries over
+- `LogToTable` → the rollback manifest, written to local disk rather than the target database, since the tool must not need write access just to keep its own notes
+
+**Planned for SQL Server:** orchestration, not reimplementation. `dbperf` will detect `IndexOptimize` and `CommandLog` in the target database and drive them through the same plan/dry-run/execute pipeline. His procedures stay his, installed and updated by you through his own channels.
+
+The division is straightforward: **his solution maintains, this one diagnoses** — and on SQL Server, hands the maintenance to his.
 
 ## Install
 
@@ -88,11 +120,37 @@ dbperf bloat --min-dead-pct 10
 dbperf blocking
 ```
 
-Add `--json` to any command for machine-readable output. Rich formatting is written to stderr in that mode, so stdout stays a clean pipe:
+Add `--json` to any check for machine-readable output. Rich formatting is written to stderr in that mode, so stdout stays a clean pipe:
 
 ```bash
 dbperf --json report | jq '.unused_indexes[] | select(.is_unique == false)'
 ```
+
+### Maintenance
+
+All of these are dry-run unless given `--execute`.
+
+```bash
+dbperf vacuum                            # preview
+dbperf vacuum --execute                  # VACUUM (ANALYZE) bloated tables
+dbperf reindex --execute                 # REINDEX INDEX CONCURRENTLY
+
+dbperf drop-unused-indexes               # preview, with refusals explained
+dbperf drop-unused-indexes --script      # emit SQL, connect for nothing else
+dbperf drop-unused-indexes --execute     # prompts for the database name
+
+dbperf restore-indexes --from ~/.db-perf-toolkit/rollbacks/shop-<stamp>.json --execute
+```
+
+`--script` output carries its own undo:
+
+```sql
+-- public.orders_status_idx: 1912 kB, 0 scans, on orders
+-- rollback: CREATE INDEX orders_status_idx ON public.orders USING btree (status);
+DROP INDEX CONCURRENTLY "public"."orders_status_idx";
+```
+
+`CONCURRENTLY` throughout — both `REINDEX` and `DROP INDEX` — so maintenance does not take a lock that blocks writes for its duration. That is the difference between a maintenance window and an outage.
 
 ## What it checks
 
@@ -160,9 +218,11 @@ The fixture disables autovacuum so dead tuples survive to be measured, and calls
 
 ## Roadmap
 
-- SQL Server backend (`sys.dm_exec_query_stats`, `sys.dm_db_missing_index_details`, `sys.dm_db_index_usage_stats`, `sys.dm_exec_requests`) behind the same CLI
-- Index bloat in addition to table bloat
-- `--since` filtering using `pg_stat_statements_reset()` checkpoints
+- SQL Server **diagnosis** (`sys.dm_exec_query_stats` / Query Store, `sys.dm_db_missing_index_details`, `sys.dm_db_index_usage_stats`, `sys.dm_exec_requests`) behind the same CLI. Query Store is 2016+, and `sys.dm_db_missing_index_details` differs on Azure SQL Database — the backend has to know which server it is talking to.
+- SQL Server **maintenance** by orchestrating Ola Hallengren's `IndexOptimize` through the same plan/dry-run/execute pipeline.
+- Object selection syntax borrowed from his `@Databases` parameter: `--tables 'public.%,-public.audit_%'`, wildcards with `-` for exclusion.
+- Run history in local SQLite, so "unused across six runs spanning three months" replaces a single snapshot as grounds for dropping an index.
+- Index bloat in addition to table bloat.
 
 ## Contributing
 
