@@ -46,6 +46,42 @@ Tables with a high dead tuple ratio
 blocking: nothing found
 ```
 
+## See it work
+
+```bash
+./scripts/demo.sh
+```
+
+Spins up a throwaway PostgreSQL container, builds a schema with real problems in it, diagnoses, remediates, and diagnoses again. Roughly 90 seconds, and it cleans up after itself (`--keep` to leave it running).
+
+What one pass changes:
+
+| | Before | After |
+|---|---|---|
+| `orders` table size | 157 MB | **99 MB** |
+| Dead tuples | 96,000 (24.0%) | **none** |
+| Unused indexes | 4 | 3 (only the safe one dropped) |
+
+The interesting part is what it *declined* to do. Four indexes had zero recorded scans; exactly one was dropped:
+
+```
+  DROP  public.orders_notes_idx  (58 MB, 0 scans, on orders)
+  skip  public.orders_reference_key — unique index (enforces uniqueness even without a constraint row)
+  skip  public.orders_id_uq — backs a constraint (dropping it changes what the table accepts)
+  skip  public.orders_status_idx — only 2552 kB — below the 8MB floor, so dropping it buys nothing
+```
+
+A fifth index, `orders_customer_idx`, never appeared at all — it is genuinely in use, so it was never a candidate.
+
+The demo finishes by calling `pg_stat_reset()` and trying again, to show the guard hold:
+
+```
+Statistics were reset 0.0 days ago, which is too short a window to conclude an
+index is unused (minimum 7 days).
+An index serving a weekly or monthly query looks untouched most of the time.
+Override with --min-stats-age-days if you are certain.
+```
+
 ## Read-only by default; writes are opt-in and reversible
 
 Diagnosis never writes. The connection is read-only **at the server**, not by the discipline of the queries:
