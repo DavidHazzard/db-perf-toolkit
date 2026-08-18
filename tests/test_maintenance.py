@@ -7,13 +7,14 @@ index is worse than no tool, so most of these assert that something is
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
 
 from db_perf_toolkit import manifest, safety
-from db_perf_toolkit.backends import connect
+from db_perf_toolkit.backends import CheckUnavailable, connect
 from db_perf_toolkit.models import StatsWindow
 
 pytestmark = pytest.mark.integration
@@ -296,3 +297,94 @@ def test_operation_target_is_quoted_and_parseable(seeded_dsn: str) -> None:
 
     with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
         cleanup.execute('DROP INDEX IF EXISTS "Odd.Dotted.Name"')
+
+
+# ----------------------------------------------------------------------
+# Free space
+# ----------------------------------------------------------------------
+
+
+def test_free_space_unavailable_without_pgstattuple(dsn: str) -> None:
+    """A missing contrib extension must explain itself, not crash."""
+    admin = psycopg.connect(dsn, autocommit=True)
+    with admin:
+        admin.execute("DROP DATABASE IF EXISTS no_pgstattuple")
+        admin.execute("CREATE DATABASE no_pgstattuple")
+
+    bare = dsn.rsplit("/", 1)[0] + "/no_pgstattuple"
+    try:
+        with connect(bare) as backend, pytest.raises(CheckUnavailable) as exc:
+            backend.free_space()
+        assert "pgstattuple" in exc.value.reason
+        assert exc.value.remedy is not None and "CREATE EXTENSION" in exc.value.remedy
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin2:
+            admin2.execute("DROP DATABASE IF EXISTS no_pgstattuple")
+
+
+def test_free_space_sees_what_dead_tuples_cannot(seeded_dsn: str) -> None:
+    """The whole reason this check exists.
+
+    After a vacuum, dead tuples read zero while the file stays the same size.
+    `bloat` therefore calls the table clean; `free-space` still sees the hole.
+    """
+    with psycopg.connect(seeded_dsn, autocommit=True) as setup:
+        setup.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+        setup.execute("DROP TABLE IF EXISTS hollow")
+        setup.execute(
+            "CREATE TABLE hollow AS "
+            "SELECT i, repeat('padding', 40) AS pad FROM generate_series(1, 200000) i"
+        )
+        setup.execute("DELETE FROM hollow WHERE i % 10 <> 0")
+
+    # VACUUM cannot remove tuples still visible to any open snapshot, and a
+    # pooled connection from an earlier test can hold one. Retry until the
+    # horizon advances rather than assuming the first pass reclaims.
+    deadline = time.monotonic() + 20
+    dead = -1
+    while time.monotonic() < deadline:
+        with psycopg.connect(seeded_dsn, autocommit=True) as vac:
+            vac.execute("VACUUM hollow")
+            vac.execute("SELECT pg_stat_force_next_flush()")
+            row = vac.execute(
+                "SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = 'hollow'"
+            ).fetchone()
+        dead = int(row[0]) if row else -1
+        if dead == 0:
+            break
+        time.sleep(0.5)
+    assert dead == 0, f"vacuum never reclaimed the dead tuples ({dead} left)"
+
+    with connect(seeded_dsn) as backend:
+        bloat = [
+            t
+            for t in backend.bloated_tables(min_dead_pct=1.0, min_dead_rows=1)
+            if t.table == "hollow"
+        ]
+        free = [
+            f
+            for f in backend.free_space(min_free_pct=10.0, min_table_bytes=1024 * 1024)
+            if f.table == "hollow"
+        ]
+
+    assert not bloat, "dead tuples are gone after the vacuum, so bloat sees nothing"
+    assert free, "but the file is still mostly empty and free-space must see it"
+    assert free[0].free_pct > 50
+    assert free[0].free_bytes > 0
+    assert free[0].method == "exact"
+
+    with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
+        cleanup.execute("DROP TABLE IF EXISTS hollow")
+
+
+def test_free_space_skips_tables_below_the_size_floor(seeded_dsn: str) -> None:
+    """Scanning every small table costs more than rewriting them would save."""
+    with psycopg.connect(seeded_dsn, autocommit=True) as setup:
+        setup.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+
+    with connect(seeded_dsn) as backend:
+        everything = backend.free_space(min_free_pct=0.0, min_table_bytes=0)
+        big_only = backend.free_space(min_free_pct=0.0, min_table_bytes=10 * 1024**3)
+
+    assert everything, "expected at least one table with no floor"
+    assert not big_only, "a 10GB floor should exclude every table here"

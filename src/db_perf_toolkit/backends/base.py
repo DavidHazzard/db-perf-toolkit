@@ -104,6 +104,11 @@ class Backend(ABC):
         except CheckUnavailable as exc:
             report.skipped["bloat"] = exc.full_message()
 
+        # free-space is deliberately absent. It reads table data rather than
+        # catalogs and can take minutes on a large database; a `report` that
+        # sometimes takes seconds and sometimes takes ten minutes is a worse
+        # tool than one that makes you ask for the expensive check.
+
         try:
             report.blocking_chains = self.blocking_chains()
         except CheckUnavailable as exc:

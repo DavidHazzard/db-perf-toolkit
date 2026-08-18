@@ -161,6 +161,45 @@ def bloat(ctx: Context, min_dead_pct: float, min_dead_rows: int) -> None:
     )
 
 
+@main.command("free-space")
+@click.option("--min-free-pct", default=20.0, show_default=True)
+@click.option("--min-size-mb", default=50, show_default=True, help="Ignore tables below this.")
+@click.option(
+    "--approx-above-mb",
+    default=1024,
+    show_default=True,
+    help="Use pgstattuple_approx above this size.",
+)
+@click.option("--exact", is_flag=True, help="Force a full scan of every candidate.")
+@click.pass_obj
+def free_space(
+    ctx: Context, min_free_pct: float, min_size_mb: int, approx_above_mb: int, exact: bool
+) -> None:
+    """Space a table rewrite would return to the operating system.
+
+    Not the same question as `bloat`. That counts dead tuples — churn waiting
+    for a vacuum — and they read zero once vacuumed, while the file stays
+    exactly as large. This is the measurement that survives a vacuum.
+
+    Unlike every other check, this reads table data rather than catalogs and
+    can therefore be slow: pgstattuple scans every page. Tables above
+    --approx-above-mb use the visibility map instead.
+
+    Requires the pgstattuple extension.
+    """
+    _run(
+        ctx,
+        "free-space",
+        lambda b: b.free_space(
+            min_free_pct=min_free_pct,
+            min_table_bytes=min_size_mb * 1024 * 1024,
+            approx_above_bytes=approx_above_mb * 1024 * 1024,
+            exact=exact,
+        ),
+        render.free_space_table,
+    )
+
+
 @main.command("blocking")
 @click.pass_obj
 def blocking(ctx: Context) -> None:

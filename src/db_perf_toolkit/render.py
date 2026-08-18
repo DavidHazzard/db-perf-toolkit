@@ -22,6 +22,7 @@ from db_perf_toolkit.models import (
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
+    TableFreeSpace,
     TableIndexBurden,
     UnusedIndex,
 )
@@ -206,6 +207,44 @@ def index_burden_table(rows: list[TableIndexBurden], cap: int | None = DEFAULT_R
             ratio,
             _count(r.writes),
             _count(r.redundant_writes),
+        )
+    _note_hidden(table, hidden, 7, "use --json for the full list")
+    return table
+
+
+def free_space_table(rows: list[TableFreeSpace], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    """Space a rewrite would return to the operating system.
+
+    Not the same question as `bloat`, which counts dead tuples. After a
+    vacuum those read zero while the file stays the same size.
+    """
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} tables)" if hidden else ""
+    table = Table(
+        title=f"Reclaimable space — what a rewrite would return{total}",
+        title_justify="left",
+    )
+    table.add_column("Table")
+    table.add_column("Size", justify="right")
+    table.add_column("Live", justify="right")
+    table.add_column("Dead", justify="right")
+    table.add_column("Free", justify="right")
+    table.add_column("Reclaimable", justify="right")
+    table.add_column("Measured")
+
+    for r in visible:
+        free = Text(f"{r.free_pct:.0f}%", style="red" if r.free_pct >= 40 else "yellow")
+        how = r.method
+        if r.method == "approx" and r.scanned_pct is not None:
+            how = f"approx ({r.scanned_pct:.0f}% scanned)"
+        table.add_row(
+            r.table,
+            _bytes(r.table_bytes),
+            f"{r.live_pct:.0f}%",
+            f"{r.dead_pct:.0f}%",
+            free,
+            _bytes(r.free_bytes),
+            how,
         )
     _note_hidden(table, hidden, 7, "use --json for the full list")
     return table

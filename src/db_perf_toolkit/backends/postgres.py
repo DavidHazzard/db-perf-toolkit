@@ -20,6 +20,7 @@ from db_perf_toolkit.models import (
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
+    TableFreeSpace,
     TableIndexBurden,
     UnusedIndex,
 )
@@ -32,6 +33,15 @@ APPLICATION_NAME = "db-perf-toolkit"
 #: more than it returns. 1000 PostgreSQL pages is 8MB, and the same logic
 #: applies to dropping: reclaiming 16KB is not worth a schema change.
 DEFAULT_MIN_INDEX_BYTES = 8 * 1024 * 1024
+
+#: Above this, pgstattuple's full scan is itself a performance incident, so
+#: pgstattuple_approx is used instead — it consults the visibility map and
+#: skips pages already known to be all-visible.
+DEFAULT_APPROX_ABOVE_BYTES = 1024**3
+
+#: Rewriting anything smaller returns too little to be worth an exclusive
+#: lock, and scanning every small table to find out is wasted work.
+DEFAULT_MIN_TABLE_BYTES = 50 * 1024 * 1024
 
 #: pg_stat_statements renamed its timing columns in PostgreSQL 13:
 #: total_time -> total_exec_time, mean_time -> mean_exec_time. Querying the
@@ -263,6 +273,112 @@ class PostgresBackend(Backend):
             )
             for row in rows
         ]
+
+    def free_space(
+        self,
+        *,
+        min_free_pct: float = 20.0,
+        min_table_bytes: int = DEFAULT_MIN_TABLE_BYTES,
+        approx_above_bytes: int = DEFAULT_APPROX_ABOVE_BYTES,
+        exact: bool = False,
+    ) -> list[TableFreeSpace]:
+        """Measure space a rewrite would reclaim.
+
+        This is the only check here that reads table data rather than
+        catalogs, and it is therefore the only one that can be expensive:
+        pgstattuple scans every page. Tables above `approx_above_bytes` use
+        pgstattuple_approx, which consults the visibility map instead, unless
+        `exact` forces a full scan. Tables below `min_table_bytes` are not
+        examined at all — measuring them costs more than rewriting them saves.
+        """
+        if not self._has_extension("pgstattuple"):
+            raise CheckUnavailable(
+                "free-space",
+                "The pgstattuple extension is not installed on this database.",
+                "It ships with PostgreSQL as a contrib module:\n"
+                "  CREATE EXTENSION pgstattuple;\n"
+                "Without it, dead tuple counts are the only bloat signal available, "
+                "and those read zero after a vacuum even when the file stays large.",
+            )
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT schemaname AS schema_name, relname AS table_name, relid,
+                       pg_relation_size(relid) AS table_bytes
+                FROM pg_stat_user_tables
+                WHERE pg_relation_size(relid) >= %s
+                ORDER BY pg_relation_size(relid) DESC
+                """,
+                (min_table_bytes,),
+            )
+            candidates = cur.fetchall()
+
+        results: list[TableFreeSpace] = []
+        for row in candidates:
+            table_bytes = int(row["table_bytes"])  # type: ignore[call-overload]
+            use_approx = not exact and table_bytes > approx_above_bytes
+            qualified = _qualified(str(row["schema_name"]), str(row["table_name"]))
+
+            if use_approx:
+                stmt = sql.SQL(
+                    "SELECT table_len, approx_free_space AS free_space, "
+                    "approx_free_percent AS free_percent, "
+                    "approx_tuple_percent AS tuple_percent, "
+                    "dead_tuple_percent, scanned_percent "
+                    "FROM pgstattuple_approx({})"
+                ).format(sql.Literal(self._render(qualified)))
+            else:
+                stmt = sql.SQL(
+                    "SELECT table_len, free_space, free_percent, tuple_percent, "
+                    "dead_tuple_percent, NULL::float8 AS scanned_percent "
+                    "FROM pgstattuple({})"
+                ).format(sql.Literal(self._render(qualified)))
+
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(stmt)
+                    stat = cur.fetchone()
+            except psycopg.errors.FeatureNotSupported:
+                # pgstattuple_approx rejects some relation kinds; the exact
+                # variant handles them, so fall back rather than skip.
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        sql.SQL(
+                            "SELECT table_len, free_space, free_percent, tuple_percent, "
+                            "dead_tuple_percent, NULL::float8 AS scanned_percent "
+                            "FROM pgstattuple({})"
+                        ).format(sql.Literal(self._render(qualified)))
+                    )
+                    stat = cur.fetchone()
+                use_approx = False
+
+            if stat is None:
+                continue
+            free_pct = float(stat["free_percent"] or 0.0)  # type: ignore[arg-type]
+            if free_pct < min_free_pct:
+                continue
+
+            results.append(
+                TableFreeSpace(
+                    schema=str(row["schema_name"]),
+                    table=str(row["table_name"]),
+                    table_bytes=int(stat["table_len"]),  # type: ignore[call-overload]
+                    live_pct=float(stat["tuple_percent"] or 0.0),  # type: ignore[arg-type]
+                    dead_pct=float(stat["dead_tuple_percent"] or 0.0),  # type: ignore[arg-type]
+                    free_bytes=int(stat["free_space"]),  # type: ignore[call-overload]
+                    free_pct=free_pct,
+                    method="approx" if use_approx else "exact",
+                    scanned_pct=(
+                        float(stat["scanned_percent"])
+                        if stat["scanned_percent"] is not None
+                        else None
+                    ),
+                )
+            )
+
+        results.sort(key=lambda r: r.free_bytes, reverse=True)
+        return results
 
     def bloated_tables(self, min_dead_pct: float, min_dead_rows: int) -> list[BloatedTable]:
         with self._conn.cursor() as cur:

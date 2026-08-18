@@ -107,6 +107,30 @@ class TableIndexBurden:
 
 
 @dataclass(frozen=True, slots=True)
+class TableFreeSpace:
+    """Space a table would return to the operating system if rewritten.
+
+    Distinct from `BloatedTable`, which counts dead tuples — churn awaiting a
+    vacuum. Once vacuumed, dead tuples read zero while the file stays exactly
+    as large, because plain VACUUM marks space reusable rather than returning
+    it. This is the measurement that survives a vacuum, and the only basis on
+    which recommending a rewrite is honest rather than a guess.
+    """
+
+    schema: str
+    table: str
+    table_bytes: int
+    live_pct: float
+    dead_pct: float
+    free_bytes: int
+    free_pct: float
+    """How the figure was obtained: "exact" scans every page, "approx" uses
+    the visibility map and reports what fraction it actually read."""
+    method: str
+    scanned_pct: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BlockingChain:
     blocked_pid: int
     blocked_user: str | None
@@ -180,6 +204,7 @@ class Report:
     unused_indexes: list[UnusedIndex] = field(default_factory=list)
     index_burden: list[TableIndexBurden] = field(default_factory=list)
     bloated_tables: list[BloatedTable] = field(default_factory=list)
+    free_space: list[TableFreeSpace] = field(default_factory=list)
     blocking_chains: list[BlockingChain] = field(default_factory=list)
     """Checks that could not run, mapped to why — e.g. a missing extension."""
     skipped: dict[str, str] = field(default_factory=dict)
