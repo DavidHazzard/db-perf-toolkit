@@ -198,3 +198,73 @@ def test_generated_sql_quotes_identifiers(seeded_dsn: str) -> None:
 
     with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
         cleanup.execute('DROP INDEX IF EXISTS "weird-Index name"')
+
+
+# ----------------------------------------------------------------------
+# Index burden
+# ----------------------------------------------------------------------
+
+
+def test_index_burden_counts_unused_per_table(seeded_dsn: str) -> None:
+    with connect(seeded_dsn) as backend:
+        rows = backend.index_burden(min_unused=1)
+
+    orders = [r for r in rows if r.table == "orders"]
+    assert orders, "orders carries unused indexes and should appear"
+    r = orders[0]
+    assert r.index_count >= r.unused_count >= 1
+    assert r.unused_bytes > 0
+    assert r.writes > 0
+
+
+def test_index_burden_ranks_by_write_amplification_not_size(seeded_dsn: str) -> None:
+    """Ranking must follow write cost, not bytes.
+
+    Two tables identical in shape and size, differing only in how much they
+    are written to. A size-based ranking cannot tell them apart; that is the
+    blind spot this check exists to cover.
+    """
+    with psycopg.connect(seeded_dsn, autocommit=True) as setup:
+        setup.execute("DROP TABLE IF EXISTS burden_hot, burden_cold")
+        for name in ("burden_hot", "burden_cold"):
+            setup.execute(
+                f"CREATE TABLE {name} (id serial PRIMARY KEY, a int, b int, c int, d int)"
+            )
+            for col in "abcd":
+                setup.execute(f"CREATE INDEX {name}_{col}_idx ON {name} ({col})")
+            setup.execute(
+                f"INSERT INTO {name} (a, b, c, d) SELECT i, i, i, i FROM generate_series(1, 5000) i"
+            )
+        # Only the hot one takes ongoing churn.
+        for _ in range(12):
+            setup.execute("UPDATE burden_hot SET a = a + 1")
+        setup.execute("VACUUM burden_hot")
+        setup.execute("SELECT pg_stat_force_next_flush()")
+
+    with connect(seeded_dsn) as backend:
+        rows = backend.index_burden(min_unused=1)
+
+    by_table = {r.table: r for r in rows}
+    assert "burden_hot" in by_table and "burden_cold" in by_table
+    hot, cold = by_table["burden_hot"], by_table["burden_cold"]
+
+    assert hot.unused_count == cold.unused_count, "same shape, so same unused count"
+    assert hot.writes > cold.writes, "the hot table should record more row writes"
+    assert hot.redundant_writes > cold.redundant_writes
+
+    order = [r.table for r in rows]
+    assert order.index("burden_hot") < order.index("burden_cold")
+
+    # And the whole result set is ordered by write cost, not size.
+    costs = [r.redundant_writes for r in rows]
+    assert costs == sorted(costs, reverse=True)
+
+    with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
+        cleanup.execute("DROP TABLE IF EXISTS burden_hot, burden_cold")
+
+
+def test_index_burden_included_in_report(seeded_dsn: str) -> None:
+    with connect(seeded_dsn) as backend:
+        report = backend.report(limit=3)
+    assert report.index_burden, "report should include index burden"
+    assert "index-burden" not in report.skipped

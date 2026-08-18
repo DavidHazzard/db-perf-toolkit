@@ -125,6 +125,24 @@ def unused_indexes(ctx: Context, max_scans: int) -> None:
     _run(ctx, "unused-indexes", lambda b: b.unused_indexes(max_scans), render.unused_indexes_table)
 
 
+@main.command("index-burden")
+@click.option(
+    "--min-unused", default=2, show_default=True, help="Only tables with at least this many."
+)
+@click.pass_obj
+def index_burden(ctx: Context, min_unused: int) -> None:
+    """Per-table index cost, ranked by write amplification.
+
+    `unused-indexes` answers "which indexes are unread"; this answers "which
+    tables are paying for them". The distinction matters because the dominant
+    cost of a redundant index is not disk, it is the B-tree write that every
+    INSERT, UPDATE and DELETE pays into it. A size floor cannot see that: ten
+    useless 16kB indexes on a hot table are individually trivial and
+    collectively expensive.
+    """
+    _run(ctx, "index-burden", lambda b: b.index_burden(min_unused), render.index_burden_table)
+
+
 @main.command("bloat")
 @click.option("--min-dead-pct", default=10.0, show_default=True)
 @click.option("--min-dead-rows", default=1000, show_default=True)

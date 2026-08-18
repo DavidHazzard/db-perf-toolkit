@@ -20,6 +20,7 @@ from db_perf_toolkit.models import (
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
+    TableIndexBurden,
     UnusedIndex,
 )
 from db_perf_toolkit.safety import index_drop_refusal
@@ -211,6 +212,54 @@ class PostgresBackend(Backend):
                 definition=str(row["definition"]),
                 is_unique=bool(row["is_unique"]),
                 enforces_constraint=bool(row["enforces_constraint"]),
+            )
+            for row in rows
+        ]
+
+    def index_burden(self, min_unused: int = 2) -> list[TableIndexBurden]:
+        """Aggregate index cost per table.
+
+        Ordered by unused indexes multiplied by row modifications, not by
+        size: the point is write amplification, which a per-index size floor
+        cannot see. Primary keys are counted in index_count because they cost
+        writes like any other index, even though they can never be dropped.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    t.schemaname AS schema_name,
+                    t.relname    AS table_name,
+                    count(i.indexrelid)                                    AS index_count,
+                    count(*) FILTER (WHERE i.idx_scan = 0)                 AS unused_count,
+                    COALESCE(sum(pg_relation_size(i.indexrelid))
+                             FILTER (WHERE i.idx_scan = 0), 0)             AS unused_bytes,
+                    COALESCE(sum(pg_relation_size(i.indexrelid)), 0)       AS index_bytes,
+                    pg_relation_size(t.relid)                              AS heap_bytes,
+                    (t.n_tup_ins + t.n_tup_upd + t.n_tup_del)              AS writes
+                FROM pg_stat_user_tables t
+                JOIN pg_stat_user_indexes i ON i.relid = t.relid
+                GROUP BY t.schemaname, t.relname, t.relid,
+                         t.n_tup_ins, t.n_tup_upd, t.n_tup_del
+                HAVING count(*) FILTER (WHERE i.idx_scan = 0) >= %s
+                ORDER BY (count(*) FILTER (WHERE i.idx_scan = 0))
+                         * (t.n_tup_ins + t.n_tup_upd + t.n_tup_del) DESC,
+                         count(i.indexrelid) DESC
+                """,
+                (min_unused,),
+            )
+            rows = cur.fetchall()
+
+        return [
+            TableIndexBurden(
+                schema=str(row["schema_name"]),
+                table=str(row["table_name"]),
+                index_count=int(row["index_count"]),  # type: ignore[call-overload]
+                unused_count=int(row["unused_count"]),  # type: ignore[call-overload]
+                unused_bytes=int(row["unused_bytes"]),  # type: ignore[call-overload]
+                index_bytes=int(row["index_bytes"]),  # type: ignore[call-overload]
+                heap_bytes=int(row["heap_bytes"]),  # type: ignore[call-overload]
+                writes=int(row["writes"]),  # type: ignore[call-overload]
             )
             for row in rows
         ]

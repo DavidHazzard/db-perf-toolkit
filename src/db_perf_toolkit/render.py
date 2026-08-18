@@ -22,14 +22,49 @@ from db_perf_toolkit.models import (
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
+    TableIndexBurden,
     UnusedIndex,
 )
 
 QUERY_PREVIEW_CHARS = 70
 
+#: Terminal tables are capped; JSON export never is. On a real database
+#: `unused-indexes` can return hundreds of rows, and a 600-line wall of text
+#: is not a report. The cap is always stated — a silently truncated list
+#: reads as "that is everything", which is worse than no list.
+DEFAULT_ROW_CAP = 25
+
+
+def _capped(rows: list[Any], cap: int | None) -> tuple[list[Any], int]:
+    """Return (visible rows, number hidden)."""
+    if cap is None or len(rows) <= cap:
+        return rows, 0
+    return rows[:cap], len(rows) - cap
+
+
+def _note_hidden(table: Table, hidden: int, columns: int, hint: str) -> None:
+    if hidden:
+        table.add_section()
+        note = Text(f"… and {hidden:,} more — {hint}", style="yellow")
+        table.add_row(note, *[""] * (columns - 1))
+
 
 def _truncate(text: str, width: int = QUERY_PREVIEW_CHARS) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _bytes(n: int) -> str:
+    for unit, size in (("GB", 1024**3), ("MB", 1024**2), ("kB", 1024)):
+        if n >= size:
+            return f"{n / size:.0f} {unit}"
+    return f"{n} B"
+
+
+def _count(n: int) -> str:
+    for unit, size in (("B", 1_000_000_000), ("M", 1_000_000), ("k", 1_000)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n:,}"
 
 
 def _ms(value: float) -> str:
@@ -83,7 +118,8 @@ def slow_queries_table(rows: list[SlowQuery]) -> Table:
     return table
 
 
-def seq_scan_table(rows: list[SeqScanHotspot]) -> Table:
+def seq_scan_table(rows: list[SeqScanHotspot], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    visible, hidden = _capped(rows, cap)
     table = Table(
         title="Sequential scan hotspots — candidates for EXPLAIN, not index recommendations",
         title_justify="left",
@@ -96,7 +132,7 @@ def seq_scan_table(rows: list[SeqScanHotspot]) -> Table:
     table.add_column("Live rows", justify="right")
     table.add_column("Size", justify="right")
 
-    for r in rows:
+    for r in visible:
         table.add_row(
             r.table,
             f"{r.seq_scans:,}",
@@ -106,18 +142,21 @@ def seq_scan_table(rows: list[SeqScanHotspot]) -> Table:
             f"{r.live_rows:,}",
             r.size_pretty,
         )
+    _note_hidden(table, hidden, 7, "use --json for the full list")
     return table
 
 
-def unused_indexes_table(rows: list[UnusedIndex]) -> Table:
-    table = Table(title="Indexes with no recorded scans", title_justify="left")
+def unused_indexes_table(rows: list[UnusedIndex], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} found)" if hidden else ""
+    table = Table(title=f"Indexes with no recorded scans{total}", title_justify="left")
     table.add_column("Table")
     table.add_column("Index")
     table.add_column("Scans", justify="right")
     table.add_column("Size", justify="right")
     table.add_column("Safe to drop?")
 
-    for r in rows:
+    for r in visible:
         if r.enforces_constraint:
             verdict = Text("no — backs a constraint", style="red")
         elif r.is_unique:
@@ -125,11 +164,57 @@ def unused_indexes_table(rows: list[UnusedIndex]) -> Table:
         else:
             verdict = Text("likely", style="green")
         table.add_row(r.table, r.index, f"{r.scans:,}", r.size_pretty, verdict)
+    _note_hidden(table, hidden, 5, "use --json for the full list")
     return table
 
 
-def bloat_table(rows: list[BloatedTable]) -> Table:
-    table = Table(title="Tables with a high dead tuple ratio", title_justify="left")
+def index_burden_table(rows: list[TableIndexBurden], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    """Per-table index cost.
+
+    Ranked by redundant writes rather than size, because that is the cost a
+    per-index size floor cannot see: an unused 16kB index on a hot table is
+    paid for on every insert, forever.
+    """
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} tables)" if hidden else ""
+    table = Table(
+        title=f"Index burden — write cost of indexes nothing reads{total}",
+        title_justify="left",
+    )
+    table.add_column("Table")
+    table.add_column("Indexes", justify="right")
+    table.add_column("Unused", justify="right")
+    table.add_column("Wasted", justify="right")
+    table.add_column("Idx/heap", justify="right")
+    table.add_column("Row writes", justify="right")
+    table.add_column("Redundant idx writes", justify="right")
+
+    for r in visible:
+        unused = Text(
+            f"{r.unused_count}/{r.index_count}",
+            style="red" if r.unused_count >= r.index_count - 1 else "yellow",
+        )
+        ratio = Text(
+            f"{r.index_to_heap_pct:.0f}%",
+            style="red" if r.index_to_heap_pct >= 100 else "",
+        )
+        table.add_row(
+            r.table,
+            str(r.index_count),
+            unused,
+            _bytes(r.unused_bytes),
+            ratio,
+            _count(r.writes),
+            _count(r.redundant_writes),
+        )
+    _note_hidden(table, hidden, 7, "use --json for the full list")
+    return table
+
+
+def bloat_table(rows: list[BloatedTable], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} found)" if hidden else ""
+    table = Table(title=f"Tables with a high dead tuple ratio{total}", title_justify="left")
     table.add_column("Table")
     table.add_column("Live", justify="right")
     table.add_column("Dead", justify="right")
@@ -137,7 +222,7 @@ def bloat_table(rows: list[BloatedTable]) -> Table:
     table.add_column("Size", justify="right")
     table.add_column("Last autovacuum")
 
-    for r in rows:
+    for r in visible:
         pct = Text(f"{r.dead_pct:.1f}%", style="red" if r.dead_pct >= 20 else "yellow")
         last = r.last_autovacuum or r.last_vacuum
         table.add_row(
@@ -148,6 +233,7 @@ def bloat_table(rows: list[BloatedTable]) -> Table:
             r.size_pretty,
             f"{last:%Y-%m-%d %H:%M}" if last else "never",
         )
+    _note_hidden(table, hidden, 6, "use --json for the full list")
     return table
 
 
@@ -180,6 +266,7 @@ def render_report(report: Report, console: Console) -> None:
         ("slow-queries", report.slow_queries, slow_queries_table),
         ("seq-scans", report.seq_scan_hotspots, seq_scan_table),
         ("unused-indexes", report.unused_indexes, unused_indexes_table),
+        ("index-burden", report.index_burden, index_burden_table),
         ("bloat", report.bloated_tables, bloat_table),
         ("blocking", report.blocking_chains, blocking_table),
     ]

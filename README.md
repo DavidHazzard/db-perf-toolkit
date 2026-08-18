@@ -152,6 +152,7 @@ dbperf report                       # every check, one pass
 dbperf slow-queries --limit 20
 dbperf seq-scans --min-scans 50 --min-rows 1000
 dbperf unused-indexes
+dbperf index-burden --min-unused 2
 dbperf bloat --min-dead-pct 10
 dbperf blocking
 ```
@@ -195,8 +196,17 @@ DROP INDEX CONCURRENTLY "public"."orders_status_idx";
 | `slow-queries` | `pg_stat_statements` | Ranked by total execution time, with each statement's share of the whole. |
 | `seq-scans` | `pg_stat_user_tables` | Tables absorbing heavy sequential scans. |
 | `unused-indexes` | `pg_stat_user_indexes`, `pg_index`, `pg_constraint` | Never-scanned indexes, with a drop-safety verdict. |
+| `index-burden` | `pg_stat_user_indexes`, `pg_stat_user_tables` | Per-table index cost, ranked by write amplification. |
 | `bloat` | `pg_stat_user_tables` | Dead tuple ratio and last vacuum time. |
 | `blocking` | `pg_blocking_pids()`, `pg_stat_activity` | Point-in-time snapshot of lock waits. |
+
+### Why `index-burden` exists separately
+
+`unused-indexes` answers "which indexes are unread". `index-burden` answers "which tables are paying for them", and they are not the same question.
+
+The dominant cost of a redundant index is not the disk it occupies — it is the B-tree write that every INSERT, UPDATE and DELETE pays into it. Ten useless 16kB indexes on a hot table are individually trivial and collectively expensive, and a per-index size floor is structurally unable to see that.
+
+This is not hypothetical. On the [benchmark](BENCHMARK.md)'s worst database, the 1,772 indexes the 8MB floor dismisses hold **twice as much** as the 33 it would act on — and `orders_2020` pays 11 redundant B-tree writes on every insert, forever.
 
 ### Two places this tool refuses to overclaim
 
@@ -239,6 +249,10 @@ backends/
 Backends own their SQL outright and translate results into the shared models, because the introspection queries for different engines have nothing in common. The CLI and renderers depend only on `models.py`, so a second engine needs no changes above the backend layer.
 
 `CheckUnavailable` distinguishes "this server cannot answer that question" from "this tool is broken". The first is reported with a remedy and exit code 3; the second is a bug.
+
+## Benchmark
+
+[BENCHMARK.md](BENCHMARK.md) records every check run five times against three databases — a small application schema, a realistic 6.3 GB / 852-index database, and a 2,017-index disaster. Scenario schemas are in [`scripts/scenarios/`](scripts/scenarios/); regenerate with `./scripts/bench.py`.
 
 ## Tests
 

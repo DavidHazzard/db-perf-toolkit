@@ -73,6 +73,40 @@ class BloatedTable:
 
 
 @dataclass(frozen=True, slots=True)
+class TableIndexBurden:
+    """Per-table index cost, which per-index reporting cannot express.
+
+    A size floor is the right heuristic for *maintenance* — rebuilding a tiny
+    index really is pointless — but it is the wrong one for *dropping*. The
+    dominant cost of a redundant index is not the disk it occupies, it is the
+    B-tree write every INSERT, UPDATE and DELETE pays into it forever. Ten
+    useless 16KB indexes on a hot table cost ten extra writes per row, and
+    every one of them looks individually harmless.
+    """
+
+    schema: str
+    table: str
+    index_count: int
+    unused_count: int
+    unused_bytes: int
+    index_bytes: int
+    heap_bytes: int
+    """Row modifications recorded: inserts + updates + deletes."""
+    writes: int
+
+    @property
+    def redundant_writes(self) -> int:
+        """Index writes bought nothing, as a count of index-row operations."""
+        return self.unused_count * self.writes
+
+    @property
+    def index_to_heap_pct(self) -> float:
+        if self.heap_bytes == 0:
+            return 0.0
+        return 100.0 * self.index_bytes / self.heap_bytes
+
+
+@dataclass(frozen=True, slots=True)
 class BlockingChain:
     blocked_pid: int
     blocked_user: str | None
@@ -144,6 +178,7 @@ class Report:
     slow_queries: list[SlowQuery] = field(default_factory=list)
     seq_scan_hotspots: list[SeqScanHotspot] = field(default_factory=list)
     unused_indexes: list[UnusedIndex] = field(default_factory=list)
+    index_burden: list[TableIndexBurden] = field(default_factory=list)
     bloated_tables: list[BloatedTable] = field(default_factory=list)
     blocking_chains: list[BlockingChain] = field(default_factory=list)
     """Checks that could not run, mapped to why — e.g. a missing extension."""

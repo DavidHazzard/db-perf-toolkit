@@ -17,6 +17,7 @@ from db_perf_toolkit.models import (
     SeqScanHotspot,
     SlowQuery,
     StatsWindow,
+    TableIndexBurden,
     UnusedIndex,
 )
 
@@ -58,6 +59,9 @@ class Backend(ABC):
     def unused_indexes(self, max_scans: int) -> list[UnusedIndex]: ...
 
     @abstractmethod
+    def index_burden(self, min_unused: int) -> list[TableIndexBurden]: ...
+
+    @abstractmethod
     def bloated_tables(self, min_dead_pct: float, min_dead_rows: int) -> list[BloatedTable]: ...
 
     @abstractmethod
@@ -89,6 +93,11 @@ class Backend(ABC):
             report.unused_indexes = self.unused_indexes(max_scans=0)
         except CheckUnavailable as exc:
             report.skipped["unused-indexes"] = exc.full_message()
+
+        try:
+            report.index_burden = self.index_burden(min_unused=2)
+        except CheckUnavailable as exc:
+            report.skipped["index-burden"] = exc.full_message()
 
         try:
             report.bloated_tables = self.bloated_tables(min_dead_pct=10.0, min_dead_rows=1000)
