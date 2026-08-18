@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate docs/benchmarks/ from bench.json and remediate.json.
 
-    ./scripts/bench_report.py bench.json docs/benchmarks [remediate.json]
+./scripts/bench_report.py bench.json docs/benchmarks [remediate.json]
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ def row(label: str, cells: list[str]) -> str:
     return f"| {label} | " + " | ".join(cells) + " |"
 
 
-
 def write(path: Path, title: str, lines: list[str]) -> None:
     path.write_text(f"# {title}\n\n" + "\n".join(lines).rstrip() + "\n")
 
@@ -57,12 +56,18 @@ def main() -> int:
         row("", [BLURB[s] for s in ORDER]),
         row("Size", [size(by[s]["catalog"]["db_bytes"]) for s in ORDER]),
         row("Indexes", [f"{by[s]['catalog']['indexes']:,}" for s in ORDER]),
-        row("Unused", [
-            f"{f[s]['unused_indexes']:,} "
-            f"({100 * f[s]['unused_indexes'] / by[s]['catalog']['indexes']:.0f}%)"
-            for s in ORDER]),
-        row("Slowest check", [
-            f"{max(by[s]['query_ms'][c]['median'] for c in CHECKS):.1f} ms" for s in ORDER]),
+        row(
+            "Unused",
+            [
+                f"{f[s]['unused_indexes']:,} "
+                f"({100 * f[s]['unused_indexes'] / by[s]['catalog']['indexes']:.0f}%)"
+                for s in ORDER
+            ],
+        ),
+        row(
+            "Slowest check",
+            [f"{max(by[s]['query_ms'][c]['median'] for c in CHECKS):.1f} ms" for s in ORDER],
+        ),
         "",
         "## Contents",
         "",
@@ -105,9 +110,13 @@ def main() -> int:
         row("Indexes", [f"{by[s]['catalog']['indexes']:,}" for s in ORDER]),
         row("Heap", [size(by[s]["catalog"]["heap_bytes"]) for s in ORDER]),
         row("Index bytes", [size(by[s]["catalog"]["index_bytes"]) for s in ORDER]),
-        row("Index-to-heap", [
-            f"**{100 * by[s]['catalog']['index_bytes'] / by[s]['catalog']['heap_bytes']:.0f}%**"
-            for s in ORDER]),
+        row(
+            "Index-to-heap",
+            [
+                f"**{100 * by[s]['catalog']['index_bytes'] / by[s]['catalog']['heap_bytes']:.0f}%**"
+                for s in ORDER
+            ],
+        ),
         "",
         "## Small",
         "",
@@ -136,8 +145,8 @@ def main() -> int:
         "| Offshore rewrite | An index on every column including four booleans. Backup tables. "
         "`users_final_v2_new`. |",
         "",
-        "It also carries the identifiers that break naive tooling: `\"Mixed.Case.Index\"`, "
-        "`\"index'with'quotes\"`, and a table named `\"user data old\"`.",
+        'It also carries the identifiers that break naive tooling: `"Mixed.Case.Index"`, '
+        '`"index\'with\'quotes"`, and a table named `"user data old"`.',
         "",
         f"Result: **{by['horror']['catalog']['indexes']:,} indexes across "
         f"{by['horror']['catalog']['tables']} tables**, "
@@ -150,7 +159,8 @@ def main() -> int:
     idx_growth = by["horror"]["catalog"]["indexes"] / by["small"]["catalog"]["indexes"]
     worst = max(
         by["horror"]["query_ms"][c]["median"] / max(by["small"]["query_ms"][c]["median"], 0.01)
-        for c in CHECKS)
+        for c in CHECKS
+    )
     perf = [
         f"Median of {runs} runs, measured **in-process**. Milliseconds.",
         "",
@@ -198,10 +208,14 @@ def main() -> int:
         "",
         "| | Small | Realistic | Horror |",
         "|---|---|---|---|",
-        row("Above floor — would drop", [
-            f"{f[s]['droppable']} → **{size(f[s]['droppable_bytes'])}**" for s in ORDER]),
-        row("Below floor — refused", [
-            f"{f[s]['under_floor']:,} → {size(f[s]['under_floor_bytes'])}" for s in ORDER]),
+        row(
+            "Above floor — would drop",
+            [f"{f[s]['droppable']} → **{size(f[s]['droppable_bytes'])}**" for s in ORDER],
+        ),
+        row(
+            "Below floor — refused",
+            [f"{f[s]['under_floor']:,} → {size(f[s]['under_floor_bytes'])}" for s in ORDER],
+        ),
         "",
         f"On the realistic database the floor works exactly as intended: what it surfaces "
         f"holds {ratio_real:.1f}x more than everything it dismisses.",
@@ -251,7 +265,9 @@ def main() -> int:
         rem = {r["scenario"]: r for r in json.loads(rem_path.read_text())}
         heaps = ", ".join(
             f"{LABEL[s]} {size(rem[s]['before']['heap_bytes'])} → "
-            f"{size(rem[s]['after_vacuum']['heap_bytes'])}" for s in ORDER)
+            f"{size(rem[s]['after_vacuum']['heap_bytes'])}"
+            for s in ORDER
+        )
         cw = rem["horror"].get("concurrent_writes") or {}
         rm = [
             "`vacuum --execute` then `drop-unused-indexes --execute`, against the same three "
@@ -263,15 +279,31 @@ def main() -> int:
             row("Dead tuples after", [f"**{rem[s]['after']['dead_tuples']:,}**" for s in ORDER]),
             row("VACUUM time", [f"{rem[s]['vacuum_seconds']:.1f}s" for s in ORDER]),
             row("Indexes dropped", [f"{rem[s]['dropped']}" for s in ORDER]),
-            row("Index bytes", [
-                f"{size(rem[s]['before']['index_bytes'])} → "
-                f"**{size(rem[s]['after']['index_bytes'])}**" for s in ORDER]),
-            row("Database size", [
-                f"{size(rem[s]['before']['db_bytes'])} → "
-                f"**{size(rem[s]['after']['db_bytes'])}**" for s in ORDER]),
-            row("Restore", [
-                f"{rem[s]['restore']['seconds']:.1f}s ({rem[s]['restore']['statements']} stmts)"
-                if rem[s]["restore"] else "—" for s in ORDER]),
+            row(
+                "Index bytes",
+                [
+                    f"{size(rem[s]['before']['index_bytes'])} → "
+                    f"**{size(rem[s]['after']['index_bytes'])}**"
+                    for s in ORDER
+                ],
+            ),
+            row(
+                "Database size",
+                [
+                    f"{size(rem[s]['before']['db_bytes'])} → "
+                    f"**{size(rem[s]['after']['db_bytes'])}**"
+                    for s in ORDER
+                ],
+            ),
+            row(
+                "Restore",
+                [
+                    f"{rem[s]['restore']['seconds']:.1f}s ({rem[s]['restore']['statements']} stmts)"
+                    if rem[s]["restore"]
+                    else "—"
+                    for s in ORDER
+                ],
+            ),
             "",
             "## VACUUM does not shrink the file",
             "",
@@ -301,8 +333,8 @@ def main() -> int:
             "## Round trip",
             "",
             "Each drop was restored from its manifest alone. On Horror that included "
-            "`\"Mixed.Case.Index\"`, `\"index'with'quotes\"` and an index on a table named "
-            "`\"user data old\"` — all recreated exactly, which is what the `sql.Identifier` "
+            '`"Mixed.Case.Index"`, `"index\'with\'quotes"` and an index on a table named '
+            '`"user data old"` — all recreated exactly, which is what the `sql.Identifier` '
             "quoting is for.",
         ]
         write(outdir / "remediation.md", "Remediation", rm)
