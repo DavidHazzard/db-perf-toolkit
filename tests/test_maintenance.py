@@ -38,8 +38,12 @@ def test_plan_refuses_unique_and_constraint_backed_indexes(seeded_dsn: str) -> N
         indexes = backend.unused_indexes(max_scans=0)
         plan = backend.plan_drop_unused_indexes(indexes, min_size_bytes=0)
 
-    planned = {op.target.split(".")[-1] for op in plan.operations}
-    refused = {t.split(".")[-1]: r for t, r in plan.refused.items()}
+    # Targets are quoted schema-qualified names, e.g. "public"."orders_pkey".
+    def name_of(target: str) -> str:
+        return target.rsplit(".", 1)[-1].strip('"')
+
+    planned = {name_of(op.target) for op in plan.operations}
+    refused = {name_of(t): r for t, r in plan.refused.items()}
 
     assert "orders_reference_key" not in planned
     assert "unique" in refused["orders_reference_key"]
@@ -268,3 +272,27 @@ def test_index_burden_included_in_report(seeded_dsn: str) -> None:
         report = backend.report(limit=3)
     assert report.index_burden, "report should include index burden"
     assert "index-burden" not in report.skipped
+
+
+def test_operation_target_is_quoted_and_parseable(seeded_dsn: str) -> None:
+    """The manifest is the audit trail for destructive work.
+
+    An unquoted "schema.name" cannot be parsed back apart once a name contains
+    a dot, which is exactly the case in schemas that need this tool most.
+    """
+    with psycopg.connect(seeded_dsn, autocommit=True) as setup:
+        setup.execute('DROP INDEX IF EXISTS "Odd.Dotted.Name"')
+        setup.execute('CREATE INDEX "Odd.Dotted.Name" ON orders (status, total_cents)')
+
+    with connect(seeded_dsn) as backend:
+        indexes = [i for i in backend.unused_indexes(max_scans=0) if i.index == "Odd.Dotted.Name"]
+        assert indexes
+        plan = backend.plan_drop_unused_indexes(indexes, min_size_bytes=0)
+
+    op = plan.operations[0]
+    assert op.target == '"public"."Odd.Dotted.Name"'
+    assert '"public"."Odd.Dotted.Name"' in op.sql
+    assert op.rollback_sql is not None and '"Odd.Dotted.Name"' in op.rollback_sql
+
+    with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
+        cleanup.execute('DROP INDEX IF EXISTS "Odd.Dotted.Name"')

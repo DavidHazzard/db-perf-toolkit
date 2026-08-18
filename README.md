@@ -252,7 +252,14 @@ Backends own their SQL outright and translate results into the shared models, be
 
 ## Benchmark
 
-[BENCHMARK.md](BENCHMARK.md) records every check run five times against three databases — a small application schema, a realistic 6.3 GB / 852-index database, and a 2,017-index disaster. Scenario schemas are in [`scripts/scenarios/`](scripts/scenarios/); regenerate with `./scripts/bench.py`.
+[BENCHMARK.md](BENCHMARK.md) records every check run five times against three databases — a small application schema, a realistic 6.3 GB / 852-index database, and a 2,017-index disaster — plus a full remediation pass on each.
+
+Two results worth knowing before you run this against anything real:
+
+- **`VACUUM` does not shrink the file.** All 12M dead tuples across the three databases were reclaimed and heap size did not move by a byte. Plain `VACUUM` marks space reusable; only `VACUUM FULL` returns it to the OS, and that rewrites the table under an ACCESS EXCLUSIVE lock. Every byte of on-disk reduction came from dropping indexes.
+- **`CONCURRENTLY` holds under load.** A writer committed 710 rows with a 0.6 ms worst-case stall while 33 indexes were dropped underneath it.
+
+Scenario schemas are in [`scripts/scenarios/`](scripts/scenarios/); regenerate with `./scripts/bench.py` and `./scripts/bench_remediate.py`.
 
 ## Tests
 

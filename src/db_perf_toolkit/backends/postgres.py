@@ -351,11 +351,20 @@ class PostgresBackend(Backend):
     def _render(self, statement: sql.Composed | sql.SQL) -> str:
         return statement.as_string(self._conn)
 
+    def _target(self, schema: str, name: str) -> str:
+        """Quoted schema-qualified name, for display and for the manifest.
+
+        Not cosmetic: `public.Mixed.Case.Index` cannot be parsed back into a
+        schema and an object, and the manifest is the audit trail for
+        destructive work.
+        """
+        return self._render(_qualified(schema, name))
+
     def plan_vacuum(self, tables: list[BloatedTable], *, analyze: bool = True) -> Plan:
         plan = Plan(engine=self.engine, database=self.database)
         verb = sql.SQL("VACUUM (ANALYZE)") if analyze else sql.SQL("VACUUM")
         for t in tables:
-            target = f"{t.schema}.{t.table}"
+            target = self._target(t.schema, t.table)
             plan.operations.append(
                 Operation(
                     target=target,
@@ -385,7 +394,7 @@ class PostgresBackend(Backend):
         for idx in indexes:
             plan.operations.append(
                 Operation(
-                    target=f"{idx.schema}.{idx.index}",
+                    target=self._target(idx.schema, idx.index),
                     description=f"rebuild {idx.size_pretty} index on {idx.table}",
                     sql=self._render(
                         sql.SQL("REINDEX INDEX CONCURRENTLY {};").format(
@@ -411,7 +420,7 @@ class PostgresBackend(Backend):
         plan = Plan(engine=self.engine, database=self.database)
 
         for idx in indexes:
-            target = f"{idx.schema}.{idx.index}"
+            target = self._target(idx.schema, idx.index)
 
             refusal = index_drop_refusal(idx)
             if refusal is not None:

@@ -62,8 +62,39 @@ And bytes are the lesser cost. `orders_2020` carries 12 indexes, 11 unread; ever
 
 That is what the `index-burden` check exists for: it ranks tables by `unused indexes × row modifications` rather than by size. The floor was a sound borrow for *maintenance* — rebuilding a tiny index really is pointless — and the wrong instrument for *dropping*.
 
+## Remediation
+
+`vacuum --execute` then `drop-unused-indexes --execute`, measured against the same three databases. Wall times include ~1s of CLI startup.
+
+| | Small | Realistic | Horror |
+|---|---|---|---|
+| Dead tuples before | 96,000 | 4,777,136 | 7,196,662 |
+| Dead tuples after | **0** | **0** | **0** |
+| VACUUM time | 1.5s | 13.1s | 10.1s |
+| Indexes dropped | 1 | 35 | 33 |
+| Index bytes | 105 MB → **47 MB** | 2.41 GB → **1.55 GB** | 1.91 GB → **1.51 GB** |
+| Database size | 173 MB → **115 MB** | 6.26 GB → **5.40 GB** | 4.37 GB → **3.97 GB** |
+| Restore time | 1.8s (1 stmts) | 9.4s (35 stmts) | 5.0s (33 stmts) |
+
+### VACUUM does not shrink the file
+
+Every dead tuple was reclaimed — 7,196,662 on Horror alone — and heap size did not move: Small 61 MB → 61 MB, Realistic 3.84 GB → 3.84 GB, Horror 2.44 GB → 2.44 GB.
+
+That is correct behaviour, not a failure. Plain `VACUUM` marks space reusable by future inserts; it does not return it to the operating system. Only `VACUUM FULL` does that, and it rewrites the table under an ACCESS EXCLUSIVE lock — an outage on anything large. **Every byte of on-disk reduction above came from dropping indexes, none from vacuuming.**
+
+### CONCURRENTLY, verified under load
+
+A second connection inserted continuously while 33 indexes were dropped from the Horror database. It committed **710 rows** with a worst-case stall of **0.6ms** and 0 errors.
+
+`DROP INDEX CONCURRENTLY` takes a SHARE UPDATE EXCLUSIVE lock rather than an ACCESS EXCLUSIVE one, so writes keep flowing. Worth measuring rather than repeating from the manual — it is the difference between a maintenance window and an incident.
+
+### Round trip
+
+Each drop was restored from its manifest alone. On Horror that included `"Mixed.Case.Index"`, `"index'with'quotes"` and an index on a table named `"user data old"` — all recreated exactly, which is what the `sql.Identifier` quoting is for.
+
 ## Caveats
 
 - Warm cache, single host, PostgreSQL 16 in Docker with `fsync=off`. These measure the tool's scaling, not your storage.
 - `autovacuum=off` in every scenario, so bloat persists to be measured. Real servers reclaim continuously.
 - Row counts are from the first run; timings from all runs.
+- The diagnostic figures above are pre-remediation: they describe plans, not executed changes. The Remediation section is the only part where anything was written.

@@ -40,7 +40,9 @@ def run_json(dsn: str, args: list[str]) -> tuple[float, object]:
     started = time.perf_counter()
     proc = subprocess.run(
         ["uv", "run", "dbperf", "--dsn", dsn, "--json", *args],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
     if proc.returncode != 0:
@@ -136,9 +138,12 @@ def measure(scenario: str, db: str, port: int, runs: int) -> dict[str, object]:
     assert isinstance(unused, list)
     floor = 8 * 1024**2
     droppable = [
-        i for i in unused
-        if not i["is_unique"] and not i["enforces_constraint"]
-        and i["scans"] == 0 and i["size_bytes"] >= floor
+        i
+        for i in unused
+        if not i["is_unique"]
+        and not i["enforces_constraint"]
+        and i["scans"] == 0
+        and i["size_bytes"] >= floor
     ]
     under_floor = [i for i in unused if i["size_bytes"] < floor]
     burden = payloads.get("index-burden") or []
@@ -167,9 +172,7 @@ def measure(scenario: str, db: str, port: int, runs: int) -> dict[str, object]:
             "under_floor": len(under_floor),
             "under_floor_bytes": sum(i["size_bytes"] for i in under_floor),
             "burden_tables": len(burden),
-            "redundant_writes": sum(
-                b["unused_count"] * b["writes"] for b in burden
-            ),
+            "redundant_writes": sum(b["unused_count"] * b["writes"] for b in burden),
             "worst_table": burden[0]["table"] if burden else None,
             "worst_unused": (
                 f"{burden[0]['unused_count']}/{burden[0]['index_count']}" if burden else None
