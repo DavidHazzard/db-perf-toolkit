@@ -34,6 +34,16 @@ APPLICATION_NAME = "db-perf-toolkit"
 #: applies to dropping: reclaiming 16KB is not worth a schema change.
 DEFAULT_MIN_INDEX_BYTES = 8 * 1024 * 1024
 
+#: Diagnostics must never become the incident, so catalog queries are bounded.
+DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
+
+#: How long to wait for a lock before giving up. This is the right bound for
+#: maintenance: it limits time spent *queuing*, not time spent working. An
+#: unbounded lock wait is how a routine operation ends up parked behind a long
+#: transaction, and for ACCESS EXCLUSIVE requests everything queues behind it
+#: in turn — including plain SELECTs.
+DEFAULT_LOCK_TIMEOUT_MS = 10_000
+
 #: Above this, pgstattuple's full scan is itself a performance incident, so
 #: pgstattuple_approx is used instead — it consults the visibility map and
 #: skips pages already known to be all-visible.
@@ -606,22 +616,33 @@ def connect(
     *,
     connect_timeout: int = 10,
     read_only: bool = True,
-    statement_timeout_ms: int = 30_000,
+    statement_timeout_ms: int | None = None,
+    lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
 ) -> PostgresBackend:
-    """Open a connection the server itself will refuse writes on.
+    """Open a connection with timeouts appropriate to what it will do.
 
-    This tool is pointed at production databases, so read-only must be
-    enforced by the server rather than by the discipline of the queries above.
+    Read-only is enforced by the server, not by the discipline of the queries
+    above, because this tool is pointed at production databases.
 
     `Connection.read_only` alone is NOT sufficient: it configures transactions
     that psycopg opens itself, and in autocommit mode psycopg opens none, so
     the attribute is silently inert and writes succeed. Setting the session
     default is what actually applies to the implicit transaction wrapping each
-    statement. Both are set — the attribute keeps the intent visible to anyone
-    reading the connection, the SET is what enforces it.
+    statement. Both are set — the attribute keeps the intent visible, the SET
+    is what enforces it.
 
-    `application_name` makes the tool identifiable in pg_stat_activity to
-    whoever is watching the server.
+    The two timeouts guard different risks, so they are not applied alike:
+
+    `statement_timeout` bounds how long a statement may run. That is right for
+    diagnostics, where a slow catalog query over a large schema should never
+    become someone's incident. It is actively wrong for maintenance: VACUUM on
+    a large table legitimately takes minutes, and a cancelled REINDEX
+    CONCURRENTLY leaves an INVALID index behind that must be dropped by hand.
+    Write connections therefore run unbounded unless a caller insists.
+
+    `lock_timeout` bounds how long we wait *to start*. That is the right guard
+    for maintenance, and it applies to both: a read blocked behind DDL is just
+    as stuck, and giving up is better than joining the queue.
     """
     conn = psycopg.connect(
         dsn,
@@ -631,14 +652,18 @@ def connect(
         row_factory=dict_row,
     )
 
-    # A diagnostic tool must never be the thing that pages someone. Catalog
-    # queries over a large schema — pg_total_relation_size especially — can be
-    # slow, so every statement is bounded.
+    if statement_timeout_ms is None:
+        statement_timeout_ms = DEFAULT_STATEMENT_TIMEOUT_MS if read_only else 0
+
     # set_config() rather than SET: SET takes no bind parameters, so it would
     # mean interpolating into SQL text.
     conn.execute(
         "SELECT set_config('statement_timeout', %s, false)",
         (str(int(statement_timeout_ms)),),
+    )
+    conn.execute(
+        "SELECT set_config('lock_timeout', %s, false)",
+        (str(int(lock_timeout_ms)),),
     )
 
     if read_only:

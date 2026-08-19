@@ -7,6 +7,7 @@ index is worse than no tool, so most of these assert that something is
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -388,3 +389,113 @@ def test_free_space_skips_tables_below_the_size_floor(seeded_dsn: str) -> None:
 
     assert everything, "expected at least one table with no floor"
     assert not big_only, "a 10GB floor should exclude every table here"
+
+
+# ----------------------------------------------------------------------
+# Timeouts
+# ----------------------------------------------------------------------
+
+
+def _guc(backend, name: str) -> str:  # type: ignore[no-untyped-def]
+    with backend._conn.cursor() as cur:
+        cur.execute(f"SHOW {name}")
+        row = cur.fetchone()
+    return str(next(iter(row.values())))
+
+
+def test_read_connections_bound_statement_time(seeded_dsn: str) -> None:
+    """A diagnostic must never become the incident it was called to find."""
+    with connect(seeded_dsn) as backend:
+        assert _guc(backend, "statement_timeout") == "30s"
+        assert _guc(backend, "lock_timeout") == "10s"
+
+
+def test_write_connections_do_not_bound_statement_time(seeded_dsn: str) -> None:
+    """Maintenance runs as long as it takes.
+
+    statement_timeout cancels VACUUM and REINDEX CONCURRENTLY like any other
+    statement. A cancelled REINDEX CONCURRENTLY leaves an INVALID index that
+    has to be dropped by hand, so bounding the *work* is the wrong guard here.
+    """
+    with connect(seeded_dsn, read_only=False) as backend:
+        assert _guc(backend, "statement_timeout") == "0"
+        # Waiting to start is still bounded — that is the risk worth capping.
+        assert _guc(backend, "lock_timeout") == "10s"
+
+
+def test_statement_timeout_would_cancel_a_vacuum(seeded_dsn: str) -> None:
+    """Demonstrates why the split exists, by reintroducing the old behaviour."""
+    from db_perf_toolkit.models import Operation
+
+    # A private table: vacuuming a shared one would clear dead tuples that
+    # other tests against this session-scoped database rely on.
+    with psycopg.connect(seeded_dsn, autocommit=True) as setup:
+        setup.execute("DROP TABLE IF EXISTS timeout_probe")
+        setup.execute(
+            "CREATE TABLE timeout_probe AS SELECT i, repeat('x', 100) AS pad "
+            "FROM generate_series(1, 80000) i"
+        )
+        setup.execute("DELETE FROM timeout_probe WHERE i % 2 = 0")
+
+    op = Operation(
+        target="timeout_probe",
+        description="probe",
+        sql='VACUUM (ANALYZE) "public"."timeout_probe";',
+        destructive=False,
+    )
+    with connect(seeded_dsn, read_only=False, statement_timeout_ms=1) as backend:
+        results = backend.execute([op])
+    assert results[0][1] is not None
+    assert "timeout" in results[0][1].lower()
+
+    # With the default, the same operation completes.
+    with connect(seeded_dsn, read_only=False) as backend:
+        results = backend.execute([op])
+    assert results[0][1] is None, results
+
+    with psycopg.connect(seeded_dsn, autocommit=True) as cleanup:
+        cleanup.execute("DROP TABLE IF EXISTS timeout_probe")
+
+
+def test_lock_timeout_gives_up_rather_than_queueing(seeded_dsn: str) -> None:
+    """Blocked maintenance should fail fast, not join the queue.
+
+    An ACCESS EXCLUSIVE request that waits blocks every lock request behind
+    it, including plain SELECTs, so a maintenance command parked on a lock
+    takes the table down before doing any work.
+    """
+    from db_perf_toolkit.models import Operation
+
+    holder_ready = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with psycopg.connect(seeded_dsn) as holder:
+            holder.execute("BEGIN")
+            holder.execute("LOCK TABLE orders IN ACCESS EXCLUSIVE MODE")
+            holder_ready.set()
+            release.wait(timeout=30)
+            holder.rollback()
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert holder_ready.wait(timeout=10)
+
+    try:
+        op = Operation(
+            target="orders",
+            description="probe",
+            sql='REINDEX INDEX CONCURRENTLY "public"."orders_status_idx";',
+            destructive=False,
+        )
+        started = time.monotonic()
+        with connect(seeded_dsn, read_only=False, lock_timeout_ms=750) as backend:
+            results = backend.execute([op])
+        waited = time.monotonic() - started
+
+        assert results[0][1] is not None, "expected the lock wait to be given up on"
+        assert "lock" in results[0][1].lower() or "timeout" in results[0][1].lower()
+        assert waited < 15, f"gave up after {waited:.1f}s, which is not failing fast"
+    finally:
+        release.set()
+        thread.join(timeout=15)

@@ -50,4 +50,17 @@ export DBPERF_DSN=postgresql://user@host/dbname
 dbperf report
 ```
 
-Connections set `application_name=db-perf-toolkit`, so the tool is identifiable in `pg_stat_activity` to whoever is watching the server, and every statement is bounded by `statement_timeout` (default 30s).
+Connections set `application_name=db-perf-toolkit`, so the tool is identifiable in `pg_stat_activity` to whoever is watching the server.
+
+## Timeouts
+
+The two timeouts guard different risks and are applied differently:
+
+| | Read connections | Write connections |
+|---|---|---|
+| `statement_timeout` | **30s** | **unbounded** |
+| `lock_timeout` | 10s | 10s |
+
+`statement_timeout` bounds how long a statement may *run*. That is right for diagnostics — a slow catalog query over a large schema should never become someone's incident — and actively wrong for maintenance. It cancels `VACUUM` and `REINDEX CONCURRENTLY` like any other statement, and a cancelled `REINDEX CONCURRENTLY` leaves an `INVALID` index behind that has to be dropped by hand.
+
+`lock_timeout` bounds how long we wait *to start*. That is the right guard for maintenance, and it applies to reads too — a query blocked behind DDL is just as stuck, and giving up beats joining the queue. It matters most for `ACCESS EXCLUSIVE` requests: once one is waiting, every lock request behind it waits too, including plain `SELECT`s. A maintenance command parked on a lock can take a table down before doing any work.

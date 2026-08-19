@@ -22,6 +22,10 @@ dbperf restore-indexes --from ~/.db-perf-toolkit/rollbacks/<file>.json --execute
 - **`--script` never connects for writes at all**, emitting SQL for a human to review.
 - **`CONCURRENTLY` throughout**, on both `REINDEX` and `DROP INDEX`, so maintenance does not take a lock that blocks writes for its duration. [Verified under load](../benchmarks/remediation.md): 710 commits with a 0.6 ms worst-case stall while 33 indexes were dropped underneath.
 
+## Timeouts
+
+Write connections run with **no `statement_timeout`** and a **10s `lock_timeout`**. Maintenance takes as long as it takes; what is bounded is time spent waiting for a lock, not time spent working. See [installation](installation.md#timeouts) for why the two differ.
+
 ## What it refuses to drop
 
 | Refused | Why |
