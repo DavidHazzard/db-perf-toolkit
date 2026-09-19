@@ -1,19 +1,31 @@
 [project]
 name = "db-perf-toolkit"
-version = "0.1.0"
+# Single source of truth is __version__ in src/db_perf_toolkit/__init__.py, which
+# is what `dbperf --version` prints. See [tool.hatch.version] and
+# docs/usage/releasing.md.
+dynamic = ["version"]
 description = "Point it at a database and it surfaces slow queries, missing indexes, unused indexes, bloat, and lock contention."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "David Hazzard", email = "david@davidhazzard.dev" }]
 keywords = ["postgresql", "performance", "dba", "cli", "database"]
 classifiers = [
+    # Alpha, deliberately: pre-1.0, never published, and a second engine in
+    # flight that will change the CLI surface.
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
+    "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
+    "Topic :: System :: Monitoring",
 ]
 
 dependencies = [
@@ -22,11 +34,19 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
+[project.optional-dependencies]
+# Optional because it needs the Microsoft ODBC driver installed on the host,
+# which pip cannot provide.
+sqlserver = ["pyodbc>=5.3.0"]
+
 [project.scripts]
 dbperf = "db_perf_toolkit.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/DavidHazzard/db-perf-toolkit"
+Documentation = "https://github.com/DavidHazzard/db-perf-toolkit/blob/main/docs/usage/installation.md"
+Changelog = "https://github.com/DavidHazzard/db-perf-toolkit/blob/main/CHANGELOG.md"
+Source = "https://github.com/DavidHazzard/db-perf-toolkit"
 Issues = "https://github.com/DavidHazzard/db-perf-toolkit/issues"
 
 [dependency-groups]
@@ -38,16 +58,37 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# >=1.27 for PEP 639 (SPDX `license` + `license-files`).
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/db_perf_toolkit/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/db_perf_toolkit"]
+
+# The wheel is the library; the sdist is the clone. scripts/ (demo.sh, the
+# benchmarks, the scenario schemas) and tests/ need a checkout to be useful,
+# so they ship in the sdist and deliberately not in the wheel.
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "tests",
+    "docs",
+    "scripts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+    "uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "integration: requires Docker; spins up a real PostgreSQL container",
+    "sqlserver: requires Docker and msodbcsql; spins up a real SQL Server container (~1.7GB image, tens of seconds to start)",
 ]
 
 [tool.ruff]
@@ -65,3 +106,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["src", "tests"]
+
+# Neither ships type stubs. pyodbc is an optional extra, so it may not even be
+# installed when mypy runs.
+[[tool.mypy.overrides]]
+module = ["pyodbc.*", "testcontainers.*"]
+ignore_missing_imports = true
