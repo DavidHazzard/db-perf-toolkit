@@ -11,10 +11,41 @@ uv sync
 uv run dbperf --help
 ```
 
+SQL Server support is an optional extra, because it needs a driver that is not
+pip-installable on its own:
+
+```bash
+uv tool install "db-perf-toolkit[sqlserver]"
+```
+
 ## Requirements
 
-- **PostgreSQL 9.6+** for most checks
 - **Python 3.11+**
+- **PostgreSQL 9.6+**, or **SQL Server 2016+** / Azure SQL Database
+
+The engine is chosen from the DSN scheme, so nothing has to be repeated on the
+command line:
+
+```bash
+dbperf --dsn postgresql://user@host/db report
+dbperf --dsn mssql://user@host/db report
+```
+
+### SQL Server
+
+Beyond the `[sqlserver]` extra you need Microsoft's ODBC driver, which is a
+system package rather than a Python one — see [Microsoft's install
+instructions](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server).
+Without it, connecting fails with a diagnosis rather than pyodbc's `IM002 ...
+Data source name not found`, which is accurate and mentions neither ODBC nor
+drivers.
+
+Checks degrade by version and edition rather than failing: Query Store is 2016+
+and falls back to the plan cache, and Azure SQL Database cannot do the
+cross-database lookups that `index-maintenance` uses to find `IndexOptimize`.
+Each unavailable check says which of those it hit.
+
+### PostgreSQL
 
 Two checks need extensions. Both ship with PostgreSQL as contrib modules; neither is required for the tool to run, and a missing one produces an explanation rather than a crash.
 

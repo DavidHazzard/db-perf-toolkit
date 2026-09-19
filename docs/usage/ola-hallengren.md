@@ -20,8 +20,10 @@ One borrow turned out to be wrong in translation. `@MinNumberOfPages` is sound f
 
 **The action model.** His solution does backups and `DBCC CHECKDB`; those are a different product.
 
-## Planned for SQL Server
+## How SQL Server uses it
 
-Orchestration, not reimplementation. `dbperf` will detect `IndexOptimize` and `CommandLog` in the target database and drive them through the same plan/dry-run/execute pipeline. His procedures stay his, installed and updated through his own channels.
+Orchestration, not reimplementation. `dbperf index-maintenance` detects `IndexOptimize` and `CommandLog` in the target database and drives them through the same plan/dry-run/execute pipeline as every other maintenance command. His procedures stay his, installed and updated through his own channels. If they are not installed, the command says so and stops — it does not fall back to something homegrown.
+
+There are two independent dry runs, and they nest. Without `--execute`, `dbperf` prints the plan and runs nothing. The generated call also carries IndexOptimize's own `@Execute = 'N'` unless `--execute` is given, so even a hand-copied `EXEC` out of `--script` still only prints what it would do.
 
 Version awareness is the part to design up front: Query Store is 2016+ with `sys.dm_exec_query_stats` as fallback, and `sys.dm_db_missing_index_details` differs on Azure SQL Database — which is why his solution ships a separate script for it.

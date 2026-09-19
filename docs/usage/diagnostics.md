@@ -11,6 +11,9 @@ dbperf index-burden --min-unused 2
 dbperf bloat --min-dead-pct 10
 dbperf free-space                   # expensive; not in `report`
 dbperf blocking
+
+dbperf missing-indexes              # SQL Server only
+dbperf fragmentation                # SQL Server only; expensive, not in `report`
 ```
 
 Add `--json` to any check for machine-readable output. Rich formatting goes to stderr in that mode, so stdout stays a clean pipe:
@@ -23,6 +26,8 @@ Terminal tables are capped at 25 rows and always say how many were hidden. JSON 
 
 ## What each check reads
 
+Sources below are PostgreSQL's; the SQL Server backend answers the same checks from DMVs, and the two [SQL Server-only checks](#checks-only-one-engine-can-answer) are listed separately.
+
 | Check | Source | Notes |
 |---|---|---|
 | `slow-queries` | `pg_stat_statements` | Ranked by total execution time, with each statement's share of the whole. |
@@ -32,6 +37,29 @@ Terminal tables are capped at 25 rows and always say how many were hidden. JSON 
 | `bloat` | `pg_stat_user_tables` | Dead tuple ratio and last vacuum time. |
 | `free-space` | `pgstattuple` | Space a rewrite would return to the OS. |
 | `blocking` | `pg_blocking_pids()`, `pg_stat_activity` | Point-in-time snapshot of lock waits. |
+
+## Checks only one engine can answer
+
+Two checks exist on SQL Server and have no PostgreSQL counterpart. That is a real difference between the engines, not a gap in this tool, and inventing an approximation would be worse than the absence.
+
+| Check | Source | Notes |
+|---|---|---|
+| `missing-indexes` | `sys.dm_db_missing_index_details` | Recommendations the optimiser wrote while compiling plans. |
+| `fragmentation` | `sys.dm_db_index_physical_stats` | Page-order drift, with Ola Hallengren's reorganize/rebuild thresholds applied. |
+
+`missing-indexes` has no PostgreSQL equivalent because PostgreSQL keeps no such record: nothing in it writes down the index the planner wished for. `seq-scans` is the nearest thing it can offer, and it answers a weaker question — tables worth an `EXPLAIN`, not recommendations.
+
+Treat `missing-indexes` output as a ranking rather than a worklist. The DMV emits a row per plan, so the same index arrives repeatedly in slightly different shapes; creating them in order builds a pile of near-duplicates, each one paid for on every write. The `impact_score` is the optimiser's own estimate multiplied by usage — a ranking signal, not a prediction.
+
+`fragmentation` uses the `LIMITED` scan mode, which reads index metadata rather than every page. `DETAILED` is more accurate and reads the lot, which is not a thing to point at a busy production server by default. Like `free-space`, it is excluded from `report`.
+
+Running either against PostgreSQL refuses with a pointer to the closest check that engine does support, and states how the two differ:
+
+```
+$ dbperf fragmentation
+fragmentation unavailable — PostgreSQL has no equivalent of this check.
+Closest here: `dbperf free-space` — measures space a rewrite would reclaim, not page-order drift.
+```
 
 ## Three distinctions the tool insists on
 
@@ -52,6 +80,8 @@ Note the distinction the tool tracks: `CREATE UNIQUE INDEX` sets `is_unique` but
 They diverge exactly where it matters. After a vacuum, dead tuples read zero while the file stays the same size, because plain `VACUUM` marks space reusable rather than returning it to the operating system. On the benchmark's worst database, `bloat` reports **zero tables** while `free-space` finds **31 holding 1.03 GB** — every one of them at 0% dead tuples.
 
 `free-space` is the only check that reads table data rather than catalogs, so it is the only one that can be slow: `pgstattuple` scans every page. Tables above `--approx-above-mb` use `pgstattuple_approx`, which consults the visibility map instead and reports what fraction it actually read. It is deliberately **not** part of `report` — a report that sometimes takes seconds and sometimes ten minutes is a worse tool than one that makes you ask.
+
+Neither check covers *index* bloat, which is a third question again; why it is not implemented yet is in the [roadmap](../roadmap.md#index-bloat).
 
 ## Why `index-burden` is separate from `unused-indexes`
 

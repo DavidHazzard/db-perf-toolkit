@@ -53,6 +53,29 @@ tagged. See [docs/usage/releasing.md](docs/usage/releasing.md).
     column pair is selected from the server version rather than assumed.
   - A missing extension or insufficient privileges raise `CheckUnavailable` with a
     remedy, and never abort the other checks in a `report` run.
+- **SQL Server.** The same CLI against SQL Server 2016+ and Azure SQL Database,
+  behind the optional `[sqlserver]` extra, with the engine chosen from the DSN
+  scheme. `slow-queries` reads Query Store where it exists and falls back to the
+  plan cache; `unused-indexes` reaches the same drop-safety verdict and the same
+  refusals; `blocking` checks permissions before reporting, because
+  `sys.dm_exec_requests` does not deny an unprivileged login — it silently shows
+  it only its own session.
+  - `missing-indexes` and `fragmentation` have no PostgreSQL counterpart and are
+    offered only where they are real, rather than approximated. A check its
+    engine cannot answer refuses with the closest check that engine *can* answer
+    and states how the two differ.
+  - `index-maintenance` orchestrates Ola Hallengren's `IndexOptimize` rather
+    than reimplementing it, through the same plan/dry-run/execute pipeline. If
+    the procedure is not installed the command says so and stops.
+  - `index-burden` is deliberately **not** offered on SQL Server.
+    `user_updates` counts statements, not rows — it reads **1** after a
+    200,000-row `INSERT` — and the plausible substitute is worse:
+    `modification_counter` is per-row but resets on every statistics update, so
+    with auto-update on it is zeroed by the very write volume it measures.
+  - Read-only is not equally enforceable. PostgreSQL holds the guarantee at the
+    server; SQL Server has no server-side equivalent outside a read-only
+    replica, so there it is this tool's discipline. That asymmetry is stated
+    rather than papered over.
 - **Opt-in write mode.** `vacuum`, `reindex` and `drop-unused-indexes`, with
   `restore-indexes` to undo a previous drop. Planning is separated from execution:
   each backend returns `Operation` objects carrying their SQL, whether they are

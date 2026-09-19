@@ -59,7 +59,21 @@ Round trips are verified at scale, including indexes named `"Mixed.Case.Index"`,
 
 `VACUUM` marks space reusable by future inserts. It does **not** return it to the operating system, and the file does not shrink. Measured across three databases: every one of 12M dead tuples reclaimed, heap size unchanged to the byte.
 
-Only `VACUUM FULL` returns space, and it rewrites the table under an `ACCESS EXCLUSIVE` lock — blocking reads as well as writes, for the duration. **The tool does not currently offer it.** See [free-space](diagnostics.md) for measuring what a rewrite would reclaim, and consider [`pg_repack`](https://github.com/reorg/pg_repack), which achieves the same result with only brief exclusive locks.
+Only `VACUUM FULL` returns space, and it rewrites the table under an `ACCESS EXCLUSIVE` lock — blocking reads as well as writes, for the duration. **The tool does not currently offer it.** See [free-space](diagnostics.md) for measuring what a rewrite would reclaim, and consider [`pg_repack`](https://github.com/reorg/pg_repack), which achieves the same result with only brief exclusive locks. Why neither is implemented yet: [roadmap](../roadmap.md#vacuum-full-and-pg_repack).
+
+## SQL Server: `index-maintenance`
+
+```bash
+dbperf index-maintenance                 # dry run
+dbperf index-maintenance --script        # print the EXEC, run nothing
+dbperf index-maintenance --execute
+```
+
+This drives [Ola Hallengren's](ola-hallengren.md) `IndexOptimize` rather than reimplementing it, through the same plan/dry-run/execute pipeline as every other maintenance command. It requires the procedure to be installed; if it is not, the command says so and stops rather than substituting something homegrown.
+
+The dry runs nest. Without `--execute` nothing runs, and the generated call also carries IndexOptimize's own `@Execute = 'N'`, so a hand-copied `EXEC` from `--script` still only prints what it would do.
+
+There is no PostgreSQL equivalent, and mapping one would mean accepting arguments it ignores: `REINDEX` has no fragmentation thresholds to honour, so `--min-pages` and the reorganize/rebuild levels have nothing to act on. `reindex` is the honest command there.
 
 ## Not implemented
 

@@ -7,9 +7,17 @@ models.py       Engine-agnostic result types
 manifest.py     Rollback manifests for destructive runs
 safety.py       Guards applied before anything destructive
 backends/
-  base.py       Backend ABC + CheckUnavailable
+  base.py       Backend ABC + CheckUnavailable; engine dispatch from the DSN
   postgres.py   All PostgreSQL catalog queries
+  sqlserver/    Split by concern, because one file was not going to hold it
+    connection.py   DSN parsing, ODBC string, connection errors worth reading
+    capabilities.py Edition and version probing: what this server can answer
+    queries.py      Query Store and plan-cache checks
+    indexes.py      Missing, unused, fragmented; index burden's refusal
+    maintenance.py  IndexOptimize orchestration
 ```
+
+`SqlServerBackend` composes those modules as mixins, and each declares the checks it implements. Nothing hand-maintains the union: `supports` is built from the parts, and a test asserts both directions — nothing advertised may fall through to the base class's refusal, and nothing implemented may go unadvertised. That test exists because the gap it catches is silent, and the tool's whole value is that it does not quietly claim things.
 
 Backends own their SQL outright and translate results into the shared models, because the introspection queries for different engines have nothing in common. The CLI and renderers depend only on `models.py`, so a second engine needs no changes above the backend layer.
 
@@ -17,7 +25,9 @@ Backends own their SQL outright and translate results into the shared models, be
 
 Maintenance commands do not run SQL directly. Each backend returns `Operation` objects carrying their SQL, whether they are destructive, and their own rollback statement. `--script`, dry-run and `--execute` then consume the same objects rather than reimplementing the SQL per mode and drifting apart.
 
-That is also the seam the SQL Server backend will use: there an `Operation`'s SQL is an `EXEC dbo.IndexOptimize ...` rather than DDL of our own, and everything downstream is unchanged.
+The SQL Server backend uses the same seam: there an `Operation`'s SQL is an `EXEC dbo.IndexOptimize ...` rather than DDL of our own, and everything downstream — `--script`, dry run, `--execute`, the rollback manifest — is unchanged.
+
+Every planning method is declared on `Backend`, refusing by default, rather than only on the concrete backends. That is what lets the CLI hold a `Backend` and stay type-checked. It is not a formality: `plan_index_maintenance` was implemented on SQL Server and left off the seam, and the result was that the orchestration could not be reached from any command at all.
 
 ## CheckUnavailable
 
