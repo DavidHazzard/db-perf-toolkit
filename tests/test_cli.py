@@ -140,23 +140,6 @@ def test_unavailable_check_exits_3_with_the_remedy(
     assert "CREATE EXTENSION pgstattuple;" in result.output
 
 
-def test_fragmentation_thresholds_match_the_backend() -> None:
-    """The CLI restates Ola's thresholds rather than importing them.
-
-    It has to: importing would pull in pyodbc, which is an optional extra. So
-    the two copies are pinned to each other here instead.
-    """
-    pytest.importorskip("pyodbc")
-    from db_perf_toolkit.backends.sqlserver import indexes, maintenance
-
-    assert cli.REORGANIZE_ABOVE_PCT == indexes.REORGANIZE_ABOVE_PCT
-    assert cli.REBUILD_ABOVE_PCT == indexes.REBUILD_ABOVE_PCT
-    assert cli.FRAGMENTATION_MIN_PAGES == indexes.DEFAULT_MIN_PAGES
-    assert cli.FRAGMENTATION_MIN_PAGES == maintenance.DEFAULT_MIN_NUMBER_OF_PAGES
-    assert cli.REORGANIZE_ABOVE_PCT == maintenance.DEFAULT_FRAGMENTATION_LEVEL_1
-    assert cli.REBUILD_ABOVE_PCT == maintenance.DEFAULT_FRAGMENTATION_LEVEL_2
-
-
 @pytest.mark.parametrize(
     ("call", "expected_pointer"),
     [

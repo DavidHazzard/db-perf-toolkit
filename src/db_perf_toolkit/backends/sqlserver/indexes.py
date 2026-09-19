@@ -68,6 +68,7 @@ from typing import Any
 
 from db_perf_toolkit.backends.sqlserver.connection import SqlServerBackend
 from db_perf_toolkit.models import Check, IndexFragmentation, MissingIndex, UnusedIndex
+from db_perf_toolkit.thresholds import MIN_PAGES, REBUILD_ABOVE_PCT, REORGANIZE_ABOVE_PCT
 
 #: Ola Hallengren's thresholds, and they are his numbers rather than ours:
 #: IndexOptimize defaults to @FragmentationLevel1 = 5 and
@@ -76,14 +77,11 @@ from db_perf_toolkit.models import Check, IndexFragmentation, MissingIndex, Unus
 #: with a known provenance, not a measurement — the right threshold for a given
 #: index depends on how it is read, and anyone who has measured their own
 #: should pass their own.
-REORGANIZE_ABOVE_PCT = 5.0
-REBUILD_ABOVE_PCT = 30.0
 
 #: Also Ola's default (@MinNumberOfPages = 1000). Below roughly eight pages an
 #: index lives on mixed extents and avg_fragmentation_in_percent is noise
 #: rather than a finding; well above that, a small index is cheap to rebuild
 #: and rebuilding it buys nothing worth the log it writes.
-DEFAULT_MIN_PAGES = 1000
 
 ACTION_REBUILD = "rebuild"
 ACTION_REORGANIZE = "reorganize"
@@ -232,7 +230,7 @@ def missing_indexes(backend: SqlServerBackend, min_impact: float = 0.0) -> list[
 def index_fragmentation(
     backend: SqlServerBackend,
     min_pct: float = REORGANIZE_ABOVE_PCT,
-    min_pages: int = DEFAULT_MIN_PAGES,
+    min_pages: int = MIN_PAGES,
     *,
     mode: str = SCAN_MODE_LIMITED,
 ) -> list[IndexFragmentation]:
@@ -327,7 +325,7 @@ class IndexChecks(SqlServerBackend):
     def index_fragmentation(
         self,
         min_pct: float = REORGANIZE_ABOVE_PCT,
-        min_pages: int = DEFAULT_MIN_PAGES,
+        min_pages: int = MIN_PAGES,
         *,
         mode: str = SCAN_MODE_LIMITED,
     ) -> list[IndexFragmentation]:

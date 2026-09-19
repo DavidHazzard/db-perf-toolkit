@@ -146,7 +146,7 @@ The GIF above is regenerable the same way — `./scripts/record-demo.sh` renders
 
 ## Tests
 
-**124 tests: 106 integration — 33 PostgreSQL, 73 SQL Server — every one against a real engine in a container, plus 18 CLI tests that need no database.** No mocked cursors anywhere: the value of this tool is entirely in whether its catalog SQL is correct, and a mock cannot establish that. The suites create genuine dead tuples, drive real sequential scans, produce a confirmed `LCK_M_IS` block from a second connection, and build 31.52% fragmentation deterministically by page splits rather than by `NEWID()`.
+**123 tests: 106 integration — 33 PostgreSQL, 73 SQL Server — every one against a real engine in a container, plus 17 CLI tests that need no database.** No mocked cursors anywhere: the value of this tool is entirely in whether its catalog SQL is correct, and a mock cannot establish that. The suites create genuine dead tuples, drive real sequential scans, produce a confirmed `LCK_M_IS` block from a second connection, and build 31.52% fragmentation deterministically by page splits rather than by `NEWID()`.
 
 Everything CI runs, runs locally — there is no `make ci` indirection and no step that exists only on the runner:
 

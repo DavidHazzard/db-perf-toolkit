@@ -6,6 +6,7 @@ render.py       Rich tables and JSON serialisation
 models.py       Engine-agnostic result types
 manifest.py     Rollback manifests for destructive runs
 safety.py       Guards applied before anything destructive
+thresholds.py   Ola Hallengren's published thresholds, shared by CLI and backend
 backends/
   base.py       Backend ABC + CheckUnavailable; engine dispatch from the DSN
   postgres.py   All PostgreSQL catalog queries

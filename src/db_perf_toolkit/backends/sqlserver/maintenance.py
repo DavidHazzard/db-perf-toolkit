@@ -85,18 +85,16 @@ from db_perf_toolkit.backends.base import CheckUnavailable
 from db_perf_toolkit.backends.sqlserver.connection import SqlServerBackend
 from db_perf_toolkit.models import BloatedTable, Operation, Plan, UnusedIndex
 from db_perf_toolkit.safety import index_drop_refusal
+from db_perf_toolkit.thresholds import INDEX_OPTIMIZE_LEVEL_1, INDEX_OPTIMIZE_LEVEL_2, MIN_PAGES
 
 #: Ola Hallengren's own defaults, kept rather than re-derived. Below
 #: @FragmentationLevel1 an index is left alone; between the two it is
 #: reorganized; above @FragmentationLevel2 it is rebuilt.
-DEFAULT_FRAGMENTATION_LEVEL_1 = 5
-DEFAULT_FRAGMENTATION_LEVEL_2 = 30
 
 #: @MinNumberOfPages: maintenance on an object smaller than this costs more
 #: than it returns. His default, and the origin of the PostgreSQL backend's
 #: 8MB floor — 1000 pages is 8MB on both engines, which is coincidence in
 #: derivation and convenience in practice.
-DEFAULT_MIN_NUMBER_OF_PAGES = 1000
 
 #: The drop floor, stated in bytes because that is what UnusedIndex carries.
 #: Same reasoning, same number as the PostgreSQL backend: reclaiming 16KB is
@@ -171,9 +169,9 @@ class MaintenanceOperations(SqlServerBackend):
         self,
         *,
         databases: str | None = None,
-        fragmentation_level_1: int = DEFAULT_FRAGMENTATION_LEVEL_1,
-        fragmentation_level_2: int = DEFAULT_FRAGMENTATION_LEVEL_2,
-        min_number_of_pages: int = DEFAULT_MIN_NUMBER_OF_PAGES,
+        fragmentation_level_1: int = INDEX_OPTIMIZE_LEVEL_1,
+        fragmentation_level_2: int = INDEX_OPTIMIZE_LEVEL_2,
+        min_number_of_pages: int = MIN_PAGES,
         execute: bool = False,
     ) -> Plan:
         """Build the `EXEC dbo.IndexOptimize` that maintains this database.

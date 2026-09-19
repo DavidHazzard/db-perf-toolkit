@@ -14,6 +14,7 @@ from rich.console import Console
 from db_perf_toolkit import __version__, manifest, render, safety
 from db_perf_toolkit.backends import Backend, CheckUnavailable, UnknownEngineError, connect
 from db_perf_toolkit.models import Operation, Plan
+from db_perf_toolkit.thresholds import MIN_PAGES, REORGANIZE_ABOVE_PCT
 
 DSN_ENVVAR = "DBPERF_DSN"
 
@@ -26,15 +27,6 @@ DSN_ENVVAR = "DBPERF_DSN"
 #: common way to reach it is a DSN naming an engine whose extra is missing —
 #: which is a connection problem from the user's side, not a usage error.
 CONNECTION_ERRORS = (psycopg.OperationalError, ConnectionError, UnknownEngineError)
-
-#: Ola Hallengren's published fragmentation thresholds: reorganize above 5%,
-#: rebuild above 30%, ignore anything under 1000 pages. Restated here because
-#: importing them would pull in the SQL Server backend, and with it pyodbc —
-#: an optional extra that is absent on a PostgreSQL-only install. A test pins
-#: these against the backend's own constants so the two cannot drift.
-REORGANIZE_ABOVE_PCT = 5.0
-REBUILD_ABOVE_PCT = 30.0
-FRAGMENTATION_MIN_PAGES = 1000
 
 
 class DbPerfGroup(click.Group):
@@ -236,7 +228,7 @@ def missing_indexes(ctx: Context, min_impact: float) -> None:
 )
 @click.option(
     "--min-pages",
-    default=FRAGMENTATION_MIN_PAGES,
+    default=MIN_PAGES,
     show_default=True,
     help="Ignore indexes smaller than this. Below ~1000 pages the number is noise.",
 )
@@ -509,7 +501,7 @@ def drop_unused_indexes(
     "index-maintenance", short_help="SQL Server: reorganize or rebuild fragmented indexes."
 )
 @click.option("--databases", default=None, help="IndexOptimize @Databases. Defaults to this one.")
-@click.option("--min-pages", default=FRAGMENTATION_MIN_PAGES, show_default=True)
+@click.option("--min-pages", default=MIN_PAGES, show_default=True)
 @click.option("--execute", is_flag=True, help="Actually run it. Off by default.")
 @click.option("--script", is_flag=True, help="Print the SQL instead of running it.")
 @click.pass_obj
