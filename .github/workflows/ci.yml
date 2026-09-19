@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -91,7 +91,7 @@ jobs:
     # error, not `continue-on-error` and not a `# type: ignore`.
     # ---------------------------------------------------------------------
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -149,7 +149,7 @@ jobs:
       # without a bump the runner keeps whichever image it first cached.
       MSSQL_CACHE_EPOCH: v1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v6
         with:
