@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
-# Record demo/out/refusal.gif from demo/demo.tape.
+# Record every tape in demo/ against one seeded database.
 #
-#   ./scripts/record-demo.sh            seed, record, tear down
+#   ./scripts/record-demo.sh            seed, record all tapes, tear down
 #   ./scripts/record-demo.sh --keep     leave the container up afterwards
 #   ./scripts/record-demo.sh --no-seed  reuse a container from a previous --keep
+#   ./scripts/record-demo.sh diagnose   record only demo/diagnose.tape
+#
+# Each tape names its own Output path. They share one seeded database and one
+# env.sh, because recording them against separate seeds would let the numbers
+# in one contradict the numbers in another — and they are shown side by side.
 #
 # Requires Docker, psql, uv, and VHS (https://github.com/charmbracelet/vhs).
 # If VHS is not on PATH this script downloads a pinned release into
@@ -24,7 +29,6 @@ CONTAINER=${DEMO_CONTAINER:-dbperf-record}
 PORT=${DEMO_PORT:-55434}
 OUT="$REPO/demo/out"
 TOOLS="$OUT/.tools"
-GIF="$OUT/refusal.gif"
 
 # VHS v0.12.0 records zero frames on this project's WSL2 reference box and
 # then exits 0 with no file, which is the worst possible failure mode for a
@@ -34,14 +38,30 @@ TTYD_VERSION=1.7.7
 
 KEEP=0
 SEED=1
+ONLY=()
 for arg in "$@"; do
   case "$arg" in
     --keep)    KEEP=1 ;;
     --no-seed) SEED=0 ;;
     -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    -*) echo "unknown argument: $arg" >&2; exit 2 ;;
+    *)  ONLY+=("$arg") ;;
   esac
 done
+
+# Which tapes to record. A named tape must exist; asking for one that does
+# not is a typo, and silently recording nothing would look like success.
+TAPES=()
+if [[ ${#ONLY[@]} -gt 0 ]]; then
+  for name in "${ONLY[@]}"; do
+    tape="demo/${name%.tape}.tape"
+    [[ -f "$tape" ]] || { echo "no such tape: $tape" >&2; exit 2; }
+    TAPES+=("$tape")
+  done
+else
+  while IFS= read -r tape; do TAPES+=("$tape"); done < <(find demo -maxdepth 1 -name '*.tape' | sort)
+fi
+[[ ${#TAPES[@]} -gt 0 ]] || { echo "no tapes found in demo/" >&2; exit 2; }
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -160,28 +180,43 @@ psql -tAc 'select 1' >/dev/null 2>&1 || true
 ENVSH
 
 # --------------------------------------------------------------- record
-say "Recording demo/demo.tape"
-rm -f "$GIF"
-env PATH="$(clean_path)" TERM=xterm-256color "$VHS" demo/demo.tape
+# Each tape declares its own `Output demo/out/<name>.gif`. That path is read
+# back out of the tape rather than assumed, so a tape that writes somewhere
+# unexpected is caught here instead of leaving a stale GIF in place and
+# reporting success.
+declare -a PRODUCED=()
 
-[[ -s "$GIF" ]] || die "VHS exited without producing $GIF.
+for tape in "${TAPES[@]}"; do
+  gif="$(awk '/^Output /{print $2; exit}' "$tape")"
+  [[ -n "$gif" ]] || die "$tape has no Output line, so there is nothing to record."
+  gif="$REPO/$gif"
+
+  say "Recording $tape -> ${gif#$REPO/}"
+  rm -f "$gif"
+  env PATH="$(clean_path)" TERM=xterm-256color "$VHS" "$tape"
+
+  [[ -s "$gif" ]] || die "VHS exited without producing ${gif#$REPO/}.
 VHS can exit 0 having captured no frames — check that ttyd and a native
 Chromium are reachable, and that VHS is not v0.12.0."
 
-# A still of the final frame, for the portfolio page and for anywhere a
-# GIF is the wrong answer. Taken from the GIF rather than VHS's own
-# Screenshot command, which was unreliable here.
-ffmpeg -y -v error -sseof -0.5 -i "$GIF" -vframes 1 "$OUT/refusal.png"
+  # A still of the final frame, for the portfolio page and for anywhere a
+  # GIF is the wrong answer. Taken from the GIF rather than VHS's own
+  # Screenshot command, which was unreliable here.
+  ffmpeg -y -v error -sseof -0.5 -i "$gif" -vframes 1 "${gif%.gif}.png"
+  PRODUCED+=("$gif" "${gif%.gif}.png")
+done
 
 say "Done"
-for f in "$GIF" "$OUT/refusal.png"; do
+for f in "${PRODUCED[@]}"; do
   printf '  %-28s %8s  (%s bytes)\n' "${f#$REPO/}" \
     "$(du -h "$f" | cut -f1)" "$(stat -c %s "$f")"
+  if [[ $f == *.gif ]]; then
+    printf '  %-28s %8s\n' "  dimensions" \
+      "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f")"
+  fi
 done
-printf '  %-28s %8s\n' "dimensions" \
-  "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$GIF")"
 echo
-echo "  Look at it before committing. A mistimed Sleep produces a GIF that"
+echo "  Look at them before committing. A mistimed Sleep produces a GIF that"
 echo "  is the right size and shows the wrong thing."
 
 if [[ $KEEP -eq 1 ]]; then
