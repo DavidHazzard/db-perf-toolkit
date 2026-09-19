@@ -155,12 +155,26 @@ class TableIndexBurden:
     unused_bytes: int
     index_bytes: int
     heap_bytes: int
-    """Row modifications recorded: inserts + updates + deletes."""
+    """Modifications recorded against the table. See `writes_unit` — the two
+    engines do not count the same thing, and this figure is only comparable
+    within one engine."""
     writes: int
+
+    """What `writes` counts: "rows" or "statements".
+
+    PostgreSQL's n_tup_ins/upd/del are per-row. SQL Server's
+    sys.dm_db_index_usage_stats.user_updates is per-STATEMENT — measured at 1
+    after a 200,000-row INSERT. Putting a statement count under a field
+    documented as rows would be wrong by five orders of magnitude on a bulk
+    load, and this check's whole argument is per-row write amplification.
+    A backend that cannot supply row counts should say so here rather than
+    substitute a number that reads the same and means something else.
+    """
+    writes_unit: str = "rows"
 
     @property
     def redundant_writes(self) -> int:
-        """Index writes bought nothing, as a count of index-row operations."""
+        """Index writes that bought nothing, in `writes_unit` units."""
         return self.unused_count * self.writes
 
     @property

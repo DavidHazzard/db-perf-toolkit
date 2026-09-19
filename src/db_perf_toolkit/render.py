@@ -187,7 +187,12 @@ def index_burden_table(rows: list[TableIndexBurden], cap: int | None = DEFAULT_R
     table.add_column("Unused", justify="right")
     table.add_column("Wasted", justify="right")
     table.add_column("Idx/heap", justify="right")
-    table.add_column("Row writes", justify="right")
+    # The header names the unit rather than assuming rows: a backend that can
+    # only report statements must not have that read as a row count.
+    unit = visible[0].writes_unit if visible else "rows"
+    table.add_column(
+        f"{unit.capitalize()[:-1] if unit.endswith('s') else unit} writes", justify="right"
+    )
     table.add_column("Redundant idx writes", justify="right")
 
     for r in visible:
