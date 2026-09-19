@@ -1,0 +1,135 @@
+# Tag-driven publish to PyPI via Trusted Publishing (OIDC). No API tokens exist
+# anywhere in this repository, and none should be created — see
+# docs/usage/releasing.md for the one-time pypi.org setup this depends on.
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Read-only by default; each job widens only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # No mypy step: type checking belongs on every push, in ci.yml, not on the
+      # one path that must stay runnable when you need to ship a fix.
+      # Integration tests need a Docker daemon; ubuntu-latest has one. A release
+      # that publishes untested code is worse than a release that takes an extra
+      # three minutes.
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # The tag is the announcement; __version__ is the truth. If they disagree,
+      # stop here rather than publishing a package whose version nobody meant.
+      - name: Tag must match the package version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          expected_wheel="dist/db_perf_toolkit-${version}-py3-none-any.whl"
+          expected_sdist="dist/db_perf_toolkit-${version}.tar.gz"
+          if [[ ! -f "${expected_wheel}" || ! -f "${expected_sdist}" ]]; then
+            echo "::error::Tag ${tag} implies version ${version}, but the build produced:"
+            ls -1 dist/
+            echo "::error::Fix __version__ in src/db_perf_toolkit/__init__.py, or retag."
+            exit 1
+          fi
+          echo "Tag ${tag} matches built version ${version}."
+
+      - name: Check package metadata
+        run: uvx twine check --strict dist/*
+
+      # Prove the artifact works before it becomes permanent. A PyPI version
+      # number can never be reused, so a broken wheel burns the number.
+      - name: Smoke test the built wheel
+        run: |
+          set -euo pipefail
+          uv venv /tmp/smoke --python 3.11
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/dbperf --help
+          /tmp/smoke/bin/dbperf --version
+          test "$(/tmp/smoke/bin/dbperf --version)" = "dbperf, version ${GITHUB_REF_NAME#v}"
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Must match the environment name in the PyPI publisher configuration.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/db-perf-toolkit
+    permissions:
+      # The OIDC token that stands in for an API token. Nothing else needs it.
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `with: password:` — the action mints a short-lived token from the
+        # OIDC identity of this workflow. Adding a token here would defeat it.
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Published to PyPI: https://pypi.org/project/db-perf-toolkit/${GITHUB_REF_NAME#v}/
+
+          See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) for what changed."

@@ -1,0 +1,274 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Shared by every job so the toolchain cannot drift between them.
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          # Caches uv's download/build cache (~/.cache/uv), keyed on the
+          # lockfile. Restoring it is what makes `uv sync` a few seconds
+          # instead of a few dozen.
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # The lockfile is the reproducibility claim; this is the only step that
+      # checks the claim is still true.
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+  types:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # ---------------------------------------------------------------------
+    # BLOCKING, and only just.
+    #
+    # This job was written to be non-blocking: `strict = true` in
+    # pyproject.toml was a target rather than a description, and mypy
+    # reported 22 errors across 6 files. Sixteen of those were one error
+    # repeated — the maintenance tests calling members the `Backend` ABC did
+    # not declare — and tightening that interface cleared all sixteen at
+    # once. The count reached zero the same day, so the `continue-on-error`
+    # is gone and strict typing is now enforced.
+    #
+    # Keep it that way. If this job starts failing, the fix is the type
+    # error, not `continue-on-error` and not a `# type: ignore`.
+    # ---------------------------------------------------------------------
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # Now that this blocks, mypy's own output in the log is the report.
+      # The error-count summary this step used to build existed only to make
+      # a non-blocking job's result visible, and is no longer worth its lines.
+      - name: mypy --strict
+        run: uv run mypy
+
+  test-postgres:
+    name: Tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # GitHub-hosted ubuntu runners ship a running Docker daemon, which is
+      # the entire reason this suite can run here at all — every test goes
+      # against a real PostgreSQL 16 server via testcontainers.
+      - name: Confirm Docker is available
+        run: docker version --format '{{.Server.Version}}'
+
+      - name: pytest
+        run: |
+          uv run pytest -q -m "not sqlserver" | tee pytest.out
+          {
+            echo "### Tests — PostgreSQL 16 (testcontainers)"
+            echo
+            echo "$(tail -n 1 pytest.out)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test-sqlserver:
+    name: Tests (SQL Server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MSSQL_IMAGE: mcr.microsoft.com/mssql/server:2022-latest
+      # Bump this to force a fresh pull. The cache key pins a moving tag, so
+      # without a bump the runner keeps whichever image it first cached.
+      MSSQL_CACHE_EPOCH: v1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # The SQL Server suite is being built alongside this workflow. Until it
+      # lands, `pytest -m sqlserver` exits 5 (nothing collected) and there is
+      # no point spending ~3 minutes on an ODBC driver and a 1.5 GB image.
+      - name: Are there any SQL Server tests yet?
+        id: probe
+        run: |
+          set +e
+          uv run pytest -m sqlserver --collect-only -q > /dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            # Zero tests collected has two very different causes, and they
+            # deserve opposite treatment.
+            #
+            # If there are no test modules at all, the suite simply has not
+            # landed yet: tolerated, because this workflow is merged before
+            # the tests it runs.
+            #
+            # If test modules DO exist and the marker still selects nothing,
+            # something regressed — the marker was renamed, or the
+            # auto-marking hook in tests/sqlserver/conftest.py stopped
+            # matching. That is a bug, it hides the entire suite, and it is
+            # the far more likely failure once the suite exists. Fail loudly.
+            if [ -n "$(find tests/sqlserver -name 'test_*.py' -print -quit 2>/dev/null)" ]; then
+              echo "::error title=SQL Server suite collected nothing::tests/sqlserver/test_*.py exist, but no test carries the 'sqlserver' marker. The marker or the auto-marking hook in tests/sqlserver/conftest.py has regressed, and the whole suite is being skipped."
+              exit 1
+            fi
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            # Loud, but not fatal. "Green because nothing ran" is the same
+            # shape of lie as "green because everything skipped", so it gets
+            # an annotation on the run and on the PR rather than a line
+            # buried in a collapsed log.
+            echo "::warning title=SQL Server suite is absent::No tests carry the 'sqlserver' marker and no tests/sqlserver/test_*.py exist yet, so the SQL Server job ran nothing."
+            {
+              echo "### Tests — SQL Server"
+              echo
+              echo "**Nothing ran.** No tests carry the \`sqlserver\` marker yet, so this job"
+              echo "skipped its setup entirely. Expected only until \`tests/sqlserver/test_*.py\` lands."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$code" -eq 0 ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::pytest collection failed with exit code $code"
+            exit "$code"
+          fi
+
+      # pyodbc is only a shim over the platform's ODBC manager; without a
+      # registered Microsoft driver every connection fails at runtime. The
+      # test fixtures *skip* rather than fail in that case, so a missing
+      # driver would otherwise show up as a green run that tested nothing —
+      # hence the explicit assertion at the end of this step.
+      - name: Install the Microsoft ODBC driver
+        if: steps.probe.outputs.found == 'true'
+        run: |
+          if ! odbcinst -q -d 2>/dev/null | grep -q 'ODBC Driver 1[78] for SQL Server'; then
+            curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+              | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc > /dev/null
+            curl -sSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list" \
+              | sudo tee /etc/apt/sources.list.d/mssql-release.list > /dev/null
+            sudo apt-get update -qq
+            sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc
+          fi
+          odbcinst -q -d
+
+      # Asked through the same interpreter pytest will use, because that is
+      # the only thing that actually settles the question. This catches BOTH
+      # ways the suite can silently skip: pyodbc absent (it lives in an
+      # optional extra, so a `uv run` that forgot `--all-extras` leaves it
+      # uninstalled) and pyodbc present with no driver registered.
+      - name: Assert the SQL Server suite can actually connect
+        if: steps.probe.outputs.found == 'true'
+        run: |
+          uv run python - <<'EOF'
+          import sys
+          try:
+              import pyodbc
+          except ImportError:
+              sys.exit("pyodbc is not installed: the sqlserver extra did not reach this environment")
+          drivers = [d for d in pyodbc.drivers() if "for SQL Server" in d]
+          if not drivers:
+              sys.exit(f"pyodbc is installed but no SQL Server driver is registered: {pyodbc.drivers()}")
+          print("usable drivers:", drivers)
+          EOF
+
+      # ---------------------------------------------------------------------
+      # Docker layer cache for the SQL Server image.
+      #
+      # mcr.microsoft.com/mssql/server:2022-latest is 626 MB of compressed
+      # layers that unpack to ~1.5 GB. Pulling it fresh every run costs a
+      # network fetch from MCR plus decompression on the runner. Caching the
+      # exported tar replaces that with a same-region cache fetch plus a local
+      # `docker load`. See docs/usage/ci.md for the measured breakdown.
+      # ---------------------------------------------------------------------
+      - name: Cache the SQL Server image
+        id: mssql-cache
+        if: steps.probe.outputs.found == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/mssql-image/image.tar
+          key: mssql-image-${{ env.MSSQL_IMAGE }}-${{ env.MSSQL_CACHE_EPOCH }}
+
+      - name: Load the SQL Server image from cache
+        if: steps.probe.outputs.found == 'true' && steps.mssql-cache.outputs.cache-hit == 'true'
+        run: |
+          docker load --input ~/mssql-image/image.tar
+          docker image inspect "$MSSQL_IMAGE" --format 'loaded {{.Id}}'
+
+      - name: Pull the SQL Server image and export it for the cache
+        if: steps.probe.outputs.found == 'true' && steps.mssql-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/mssql-image
+          docker pull "$MSSQL_IMAGE"
+          docker save "$MSSQL_IMAGE" --output ~/mssql-image/image.tar
+          ls -lh ~/mssql-image/image.tar
+
+      # -rs prints the reason for every skip. Do not run this under xdist:
+      # each worker gets its own pytest session and therefore its own 1.7 GB
+      # container.
+      - name: pytest -m sqlserver
+        if: steps.probe.outputs.found == 'true'
+        run: |
+          uv run pytest -q -rs -m sqlserver | tee pytest-sqlserver.out
+          summary=$(tail -n 1 pytest-sqlserver.out)
+          {
+            echo "### Tests — SQL Server 2022 (testcontainers)"
+            echo
+            echo "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A suite that skipped everything exits 0. That is a green job that
+          # tested nothing, which is worse than a red one.
+          case "$summary" in
+            *" passed"*) ;;
+            *) echo "::error::No SQL Server test actually ran — every test skipped. Reasons are listed above."
+               exit 1 ;;
+          esac

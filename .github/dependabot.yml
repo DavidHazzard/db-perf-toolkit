@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Python dependencies. Dependabot reads pyproject.toml and opens PRs against
+  # the pinned versions; `uv lock --check` in CI catches a lockfile left behind.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      dev-dependencies:
+        patterns:
+          - pytest*
+          - ruff
+          - mypy
+          - testcontainers
+
+  # Workflow actions. Pinned to major tags in ci.yml, so this mostly surfaces
+  # the occasional major bump rather than weekly noise.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
