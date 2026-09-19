@@ -15,6 +15,7 @@ from db_perf_toolkit.backends.base import Backend, CheckUnavailable
 from db_perf_toolkit.models import (
     BloatedTable,
     BlockingChain,
+    Check,
     Operation,
     Plan,
     SeqScanHotspot,
@@ -61,6 +62,22 @@ _PGSS_RENAME_VERSION = 13
 
 class PostgresBackend(Backend):
     engine = "PostgreSQL"
+
+    #: No MISSING_INDEXES: PostgreSQL has no server-side recommendation to
+    #: relay, which is why seq-scans exists instead. No FRAGMENTATION: index
+    #: page-order drift is a SQL Server concern; the PostgreSQL analogue of
+    #: reclaimable space is free-space.
+    supports = frozenset(
+        {
+            Check.SLOW_QUERIES,
+            Check.SEQ_SCANS,
+            Check.UNUSED_INDEXES,
+            Check.INDEX_BURDEN,
+            Check.BLOAT,
+            Check.FREE_SPACE,
+            Check.BLOCKING,
+        }
+    )
 
     def __init__(
         self, conn: psycopg.Connection[dict[str, object]], *, read_only: bool = True

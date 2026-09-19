@@ -8,6 +8,70 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
+
+
+class Check(StrEnum):
+    """Every check the CLI can run.
+
+    Backends declare which of these they support. A check a backend does not
+    support is refused with an explanation, never silently absent — "this
+    engine has no equivalent" is information, and a blank section is not.
+    """
+
+    SLOW_QUERIES = "slow-queries"
+    SEQ_SCANS = "seq-scans"
+    MISSING_INDEXES = "missing-indexes"
+    UNUSED_INDEXES = "unused-indexes"
+    INDEX_BURDEN = "index-burden"
+    BLOAT = "bloat"
+    FREE_SPACE = "free-space"
+    FRAGMENTATION = "fragmentation"
+    BLOCKING = "blocking"
+
+
+@dataclass(frozen=True, slots=True)
+class MissingIndex:
+    """An index the server itself says is missing.
+
+    SQL Server only, and the asymmetry is deliberate. `sys.dm_db_missing_index_details`
+    is a genuine server-side recommendation built from optimiser activity.
+    PostgreSQL has no equivalent, which is why its nearest check is called
+    `seq-scans` and reports candidates for EXPLAIN rather than recommendations.
+    Forcing the two engines to expose the same check would mean inventing one.
+    """
+
+    schema: str
+    table: str
+    equality_columns: str | None
+    inequality_columns: str | None
+    included_columns: str | None
+    """Optimiser's own estimate of the percentage improvement, times seeks.
+    Not a promise — it is a ranking signal, and the README says so."""
+    impact_score: float
+    seeks: int
+    scans: int
+    last_seen: datetime | None
+    create_statement: str
+
+
+@dataclass(frozen=True, slots=True)
+class IndexFragmentation:
+    """SQL Server's analogue of bloat, at the index rather than table level.
+
+    Not interchangeable with `BloatedTable`: that counts dead tuples awaiting
+    a vacuum, a concept SQL Server does not have. This measures how far an
+    index's physical page order has drifted from its logical order.
+    """
+
+    schema: str
+    table: str
+    index: str
+    fragmentation_pct: float
+    page_count: int
+    page_density_pct: float | None
+    """Ola Hallengren's thresholds: reorganize above 5%, rebuild above 30%."""
+    recommended_action: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +217,15 @@ class StatsWindow:
 
     stats_reset: datetime | None
     server_version: str
+    """How the window was established, for the note printed above every report.
+
+    PostgreSQL reads pg_stat_database.stats_reset. SQL Server has no such
+    column: its usage counters reset when the service restarts, so the window
+    is bounded by sqlserver_start_time. Same guard, different mechanism, and
+    the consequence of ignoring it is worse on SQL Server — after a failover
+    every index looks unused.
+    """
+    window_source: str = "stats_reset"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +274,8 @@ class Report:
     window: StatsWindow
     slow_queries: list[SlowQuery] = field(default_factory=list)
     seq_scan_hotspots: list[SeqScanHotspot] = field(default_factory=list)
+    missing_indexes: list[MissingIndex] = field(default_factory=list)
+    index_fragmentation: list[IndexFragmentation] = field(default_factory=list)
     unused_indexes: list[UnusedIndex] = field(default_factory=list)
     index_burden: list[TableIndexBurden] = field(default_factory=list)
     bloated_tables: list[BloatedTable] = field(default_factory=list)
