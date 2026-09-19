@@ -256,7 +256,7 @@ jobs:
       - name: Cache the SQL Server image
         id: mssql-cache
         if: steps.probe.outputs.found == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/mssql-image/image.tar
           key: mssql-image-${{ env.MSSQL_IMAGE }}-${{ env.MSSQL_CACHE_EPOCH }}
