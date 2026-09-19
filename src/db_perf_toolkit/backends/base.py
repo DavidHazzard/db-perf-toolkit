@@ -47,6 +47,35 @@ class CheckUnavailable(Exception):
         return f"{self.reason}\n{self.remedy}" if self.remedy else self.reason
 
 
+#: The nearest check on the *other* engine, for checks one engine cannot answer.
+#:
+#: These are neighbours, not equivalents, and the wording says so on purpose.
+#: `free-space` and `fragmentation` both describe physical storage drift but
+#: measure different things, and `seq-scans` is a weaker signal than the
+#: optimiser's own recommendations — presenting either pair as a substitution
+#: would be the kind of false equivalence this tool exists to avoid. The point
+#: is to hand someone the next thing to try rather than a list of eight
+#: unrelated check names.
+_NEAREST_EQUIVALENT: dict[Check, tuple[Check, str]] = {
+    Check.FRAGMENTATION: (
+        Check.FREE_SPACE,
+        "measures space a rewrite would reclaim, not page-order drift",
+    ),
+    Check.FREE_SPACE: (
+        Check.FRAGMENTATION,
+        "measures page-order drift, not space a rewrite would reclaim",
+    ),
+    Check.MISSING_INDEXES: (
+        Check.SEQ_SCANS,
+        "reports tables worth an EXPLAIN, not recommendations from the optimiser",
+    ),
+    Check.BLOAT: (
+        Check.FRAGMENTATION,
+        "measures page-order drift; this engine has no dead tuples to count",
+    ),
+}
+
+
 class Backend(ABC):
     """Read-only access to one database server's performance statistics.
 
@@ -79,10 +108,15 @@ class Backend(ABC):
     # ------------------------------------------------------------------
 
     def _unsupported(self, check: Check) -> CheckUnavailable:
+        lines = []
+        neighbour = _NEAREST_EQUIVALENT.get(check)
+        if neighbour and neighbour[0] in self.supports:
+            lines.append(f"Closest here: `dbperf {neighbour[0]}` — {neighbour[1]}.")
+        lines.append(f"Supported here: {', '.join(sorted(str(c) for c in self.supports))}")
         return CheckUnavailable(
             str(check),
             f"{self.engine} has no equivalent of this check.",
-            f"Supported here: {', '.join(sorted(str(c) for c in self.supports))}",
+            "\n".join(lines),
         )
 
     def slow_queries(self, limit: int) -> list[SlowQuery]:
@@ -148,6 +182,29 @@ class Backend(ABC):
         self, indexes: list[UnusedIndex], *, min_size_bytes: int = 0
     ) -> Plan:
         raise self._no_maintenance("drop-unused-indexes")
+
+    def plan_index_maintenance(
+        self,
+        *,
+        databases: str | None = None,
+        fragmentation_level_1: int = 5,
+        fragmentation_level_2: int = 30,
+        min_number_of_pages: int = 1000,
+        execute: bool = False,
+    ) -> Plan:
+        """Plan a reorganize/rebuild pass over this database's indexes.
+
+        Declared on the seam for the same reason as the rest of this section:
+        without it the CLI cannot reach the operation while holding a Backend,
+        and SQL Server's IndexOptimize orchestration was unreachable for
+        exactly that reason until this was added.
+
+        PostgreSQL refuses it rather than approximating. Its REINDEX has no
+        fragmentation thresholds to honour, so mapping these parameters onto
+        it would mean accepting arguments it then ignores — `reindex` is the
+        honest command there.
+        """
+        raise self._no_maintenance("index-maintenance")
 
     def execute(self, operations: list[Operation]) -> list[tuple[Operation, str | None]]:
         raise self._no_maintenance("execute")

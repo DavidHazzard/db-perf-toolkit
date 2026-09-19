@@ -18,6 +18,8 @@ from rich.text import Text
 from db_perf_toolkit.models import (
     BloatedTable,
     BlockingChain,
+    IndexFragmentation,
+    MissingIndex,
     Report,
     SeqScanHotspot,
     SlowQuery,
@@ -299,6 +301,83 @@ def blocking_table(rows: list[BlockingChain]) -> Table:
             r.blocking_state or "—",
             _truncate(r.blocking_query, 40),
         )
+    return table
+
+
+def missing_indexes_table(rows: list[MissingIndex], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    """SQL Server's own missing-index recommendations.
+
+    The impact score is the optimiser's estimate multiplied by usage, and it
+    is a ranking signal rather than a prediction — the header says so, because
+    a bare number in a column called "Impact" reads as a promise. The CREATE
+    statement is deliberately not shown here: these recommendations overlap
+    heavily with each other, and pasting them in order builds a pile of
+    near-duplicate indexes. Use --json to get the statements.
+    """
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} found)" if hidden else ""
+    table = Table(
+        title=f"Missing indexes — optimiser suggestions, ranked not prescribed{total}",
+        title_justify="left",
+    )
+    table.add_column("Table")
+    table.add_column("Equality cols", overflow="ellipsis", max_width=30)
+    table.add_column("Inequality cols", overflow="ellipsis", max_width=22)
+    table.add_column("Included", overflow="ellipsis", max_width=22)
+    table.add_column("Impact", justify="right")
+    table.add_column("Seeks", justify="right")
+
+    for r in visible:
+        table.add_row(
+            f"{r.schema}.{r.table}",
+            r.equality_columns or "—",
+            r.inequality_columns or "—",
+            r.included_columns or "—",
+            f"{r.impact_score:,.0f}",
+            _count(r.seeks),
+        )
+    _note_hidden(table, hidden, 6, "use --json for the full list and CREATE statements")
+    return table
+
+
+def fragmentation_table(rows: list[IndexFragmentation], cap: int | None = DEFAULT_ROW_CAP) -> Table:
+    """Index fragmentation with Ola Hallengren's thresholds applied.
+
+    Not the same question as `bloat`. That counts dead tuples awaiting a
+    vacuum — a concept SQL Server does not have. This measures how far an
+    index's physical page order has drifted from its logical order.
+    """
+    visible, hidden = _capped(rows, cap)
+    total = f" ({len(rows):,} indexes)" if hidden else ""
+    table = Table(
+        title=f"Index fragmentation{total}",
+        title_justify="left",
+    )
+    table.add_column("Table")
+    table.add_column("Index")
+    table.add_column("Frag %", justify="right")
+    table.add_column("Pages", justify="right")
+    table.add_column("Density", justify="right")
+    table.add_column("Action")
+
+    for r in visible:
+        pct = Text(
+            f"{r.fragmentation_pct:.1f}%",
+            style="red" if r.fragmentation_pct >= 30 else "yellow",
+        )
+        action = Text(
+            r.recommended_action,
+            style="red" if r.recommended_action.lower().startswith("rebuild") else "yellow",
+        )
+        table.add_row(
+            f"{r.schema}.{r.table}",
+            r.index,
+            pct,
+            _count(r.page_count),
+            f"{r.page_density_pct:.0f}%" if r.page_density_pct is not None else "—",
+            action,
+        )
+    _note_hidden(table, hidden, 6, "use --json for the full list")
     return table
 
 

@@ -12,14 +12,57 @@ import psycopg
 from rich.console import Console
 
 from db_perf_toolkit import __version__, manifest, render, safety
-from db_perf_toolkit.backends import Backend, CheckUnavailable, connect
+from db_perf_toolkit.backends import Backend, CheckUnavailable, UnknownEngineError, connect
 from db_perf_toolkit.models import Operation, Plan
 
 DSN_ENVVAR = "DBPERF_DSN"
 
+#: Connection failures that deserve a message rather than a traceback.
+#:
+#: `ConnectionError` is the builtin, and it is what covers SQL Server:
+#: SqlServerConnectionError subclasses it precisely so this module never has
+#: to import pyodbc, which is an optional extra and absent on a
+#: PostgreSQL-only install. UnknownEngineError is here because the most
+#: common way to reach it is a DSN naming an engine whose extra is missing —
+#: which is a connection problem from the user's side, not a usage error.
+CONNECTION_ERRORS = (psycopg.OperationalError, ConnectionError, UnknownEngineError)
+
+#: Ola Hallengren's published fragmentation thresholds: reorganize above 5%,
+#: rebuild above 30%, ignore anything under 1000 pages. Restated here because
+#: importing them would pull in the SQL Server backend, and with it pyodbc —
+#: an optional extra that is absent on a PostgreSQL-only install. A test pins
+#: these against the backend's own constants so the two cannot drift.
+REORGANIZE_ABOVE_PCT = 5.0
+REBUILD_ABOVE_PCT = 30.0
+FRAGMENTATION_MIN_PAGES = 1000
+
+
+class DbPerfGroup(click.Group):
+    """Turns the two expected failure modes into messages, once, for every command.
+
+    These were handled per-command, which meant every new command silently
+    opted out: the maintenance commands were added later and tracebacked on a
+    bad DSN because nobody remembered the `except`. Catching here makes the
+    behaviour a property of the CLI rather than of whoever wrote the command.
+    """
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except CheckUnavailable as exc:
+            # Not a crash: the server cannot answer this question, and the
+            # message says what would make it able to.
+            click.secho(f"{exc.check} unavailable — {exc.reason}", fg="yellow", err=True)
+            if exc.remedy:
+                click.secho(exc.remedy, fg="yellow", err=True)
+            sys.exit(3)
+        except CONNECTION_ERRORS as exc:
+            click.secho(f"Could not connect: {str(exc).strip()}", fg="red", err=True)
+            sys.exit(2)
+
 
 class Context:
-    def __init__(self, dsn: str, as_json: bool, timeout: int) -> None:
+    def __init__(self, dsn: str | None, as_json: bool, timeout: int) -> None:
         self.dsn = dsn
         self.as_json = as_json
         self.timeout = timeout
@@ -27,27 +70,30 @@ class Context:
         # JSON goes to stdout clean; Rich chrome must not contaminate a pipe.
         self.console = Console(stderr=as_json)
 
+    def require_dsn(self) -> str:
+        """Demand the connection string at the point of use, not at parse time.
+
+        `--dsn` is deliberately not `required=True`. Click validates group
+        options before dispatching to the subcommand, so a required one makes
+        `dbperf bloat --help` fail with "Missing option '--dsn'" — the tool
+        refusing to explain itself until you hand it a database.
+        """
+        if not self.dsn:
+            raise click.UsageError(
+                f"Missing option '--dsn'. Pass a connection string or set ${DSN_ENVVAR}."
+            )
+        return self.dsn
+
     def backend(self) -> Backend:
         """Always read-only. Writes require an explicit second connection."""
-        return connect(self.dsn, connect_timeout=self.timeout)
+        return connect(self.require_dsn(), connect_timeout=self.timeout)
 
 
 def _run(ctx: Context, check: str, fetch: Callable[[Backend], list[Any]], build: Any) -> None:
     """Shared body for the single-check commands."""
-    try:
-        with ctx.backend() as backend:
-            window = backend.stats_window()
-            rows = fetch(backend)
-    except CheckUnavailable as exc:
-        # Not a crash: the server simply cannot answer this question yet, and
-        # the message says what to do about it.
-        click.secho(f"{check} unavailable — {exc.reason}", fg="yellow", err=True)
-        if exc.remedy:
-            click.secho(exc.remedy, fg="yellow", err=True)
-        sys.exit(3)
-    except psycopg.OperationalError as exc:
-        click.secho(f"Could not connect: {str(exc).strip()}", fg="red", err=True)
-        sys.exit(2)
+    with ctx.backend() as backend:
+        window = backend.stats_window()
+        rows = fetch(backend)
 
     if ctx.as_json:
         click.echo(render.to_json(rows))
@@ -61,22 +107,32 @@ def _run(ctx: Context, check: str, fetch: Callable[[Backend], list[Any]], build:
         ctx.console.print(f"[dim]{check}: nothing found[/dim]")
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(cls=DbPerfGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="dbperf")
 @click.option(
     "--dsn",
-    required=True,
     envvar=DSN_ENVVAR,
-    help=f"PostgreSQL connection string. Reads ${DSN_ENVVAR} if not given.",
+    help=(
+        "Connection string; the scheme picks the engine "
+        f"(postgresql:// or mssql://). Reads ${DSN_ENVVAR} if not given."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout instead of a table.")
 @click.option("--timeout", default=10, show_default=True, help="Connection timeout in seconds.")
 @click.pass_context
-def main(ctx: click.Context, dsn: str, as_json: bool, timeout: int) -> None:
-    """Surface performance problems in a PostgreSQL database.
+def main(ctx: click.Context, dsn: str | None, as_json: bool, timeout: int) -> None:
+    """Surface performance problems in a PostgreSQL or SQL Server database.
 
     Every command opens a read-only connection and reads only statistics and
     catalog views. Nothing is written, and no query is run against your data.
+
+    Read-only is not equally enforceable on both engines. PostgreSQL holds the
+    guarantee at the server, so a bug in this tool cannot write. SQL Server has
+    no server-side equivalent outside a read-only replica, so there the
+    guarantee is this tool's discipline — see the README.
+
+    Not every check exists on both engines, because some have no honest
+    counterpart: `dbperf <check> --help` says which engines answer it.
     """
     ctx.obj = Context(dsn=dsn, as_json=as_json, timeout=timeout)
 
@@ -141,6 +197,67 @@ def index_burden(ctx: Context, min_unused: int) -> None:
     collectively expensive.
     """
     _run(ctx, "index-burden", lambda b: b.index_burden(min_unused), render.index_burden_table)
+
+
+@main.command("missing-indexes", short_help="SQL Server: indexes the optimiser says it wanted.")
+@click.option(
+    "--min-impact",
+    default=0.0,
+    show_default=True,
+    help="Drop suggestions scoring below this.",
+)
+@click.pass_obj
+def missing_indexes(ctx: Context, min_impact: float) -> None:
+    """Indexes the optimiser says it wanted. SQL Server only.
+
+    The absence of a PostgreSQL equivalent is real, not an omission:
+    sys.dm_db_missing_index_details is written by the optimiser itself as it
+    compiles plans, and PostgreSQL keeps no such record. `seq-scans` is the
+    nearest thing it can offer, and it answers a weaker question.
+
+    Treat the output as a ranking, not a worklist. The DMV emits one row per
+    plan, so the same index arrives several times in slightly different
+    shapes; creating them in order builds a pile of near-duplicates.
+    """
+    _run(
+        ctx,
+        "missing-indexes",
+        lambda b: b.missing_indexes(min_impact),
+        render.missing_indexes_table,
+    )
+
+
+@main.command("fragmentation", short_help="SQL Server: indexes whose page order has drifted.")
+@click.option(
+    "--min-pct",
+    default=REORGANIZE_ABOVE_PCT,
+    show_default=True,
+    help="Ignore indexes below this fragmentation.",
+)
+@click.option(
+    "--min-pages",
+    default=FRAGMENTATION_MIN_PAGES,
+    show_default=True,
+    help="Ignore indexes smaller than this. Below ~1000 pages the number is noise.",
+)
+@click.pass_obj
+def fragmentation(ctx: Context, min_pct: float, min_pages: int) -> None:
+    """Indexes whose page order has drifted. SQL Server only.
+
+    Not the same question as `bloat`, which counts dead tuples — something
+    SQL Server does not have. Recommended actions follow Ola Hallengren's
+    thresholds: reorganize above 5%, rebuild above 30%.
+
+    Uses the LIMITED scan mode, which reads index metadata rather than the
+    pages themselves. DETAILED is more accurate and reads every page, which
+    is not something to point at a busy production server by default.
+    """
+    _run(
+        ctx,
+        "fragmentation",
+        lambda b: b.index_fragmentation(min_pct, min_pages),
+        render.fragmentation_table,
+    )
 
 
 @main.command("bloat")
@@ -219,12 +336,8 @@ def report(ctx: Context, limit: int) -> None:
     Checks the server cannot answer are reported as skipped rather than
     aborting the run.
     """
-    try:
-        with ctx.backend() as backend:
-            result = backend.report(limit)
-    except psycopg.OperationalError as exc:
-        click.secho(f"Could not connect: {str(exc).strip()}", fg="red", err=True)
-        sys.exit(2)
+    with ctx.backend() as backend:
+        result = backend.report(limit)
 
     if ctx.as_json:
         click.echo(render.to_json(result))
@@ -297,7 +410,7 @@ def _apply(ctx: Context, plan: Plan, *, execute: bool, script: bool, assume_yes:
                 click.secho("Name did not match — nothing was run.", fg="yellow")
                 sys.exit(4)
 
-    with connect(ctx.dsn, connect_timeout=ctx.timeout, read_only=False) as backend:
+    with connect(ctx.require_dsn(), connect_timeout=ctx.timeout, read_only=False) as backend:
         results = backend.execute(plan.operations)
 
     failures = [(op, err) for op, err in results if err]
@@ -392,6 +505,45 @@ def drop_unused_indexes(
     _apply(ctx, plan, execute=execute, script=script, assume_yes=assume_yes)
 
 
+@main.command(
+    "index-maintenance", short_help="SQL Server: reorganize or rebuild fragmented indexes."
+)
+@click.option("--databases", default=None, help="IndexOptimize @Databases. Defaults to this one.")
+@click.option("--min-pages", default=FRAGMENTATION_MIN_PAGES, show_default=True)
+@click.option("--execute", is_flag=True, help="Actually run it. Off by default.")
+@click.option("--script", is_flag=True, help="Print the SQL instead of running it.")
+@click.pass_obj
+def index_maintenance(
+    ctx: Context,
+    databases: str | None,
+    min_pages: int,
+    execute: bool,
+    script: bool,
+) -> None:
+    """Reorganize or rebuild fragmented indexes. SQL Server only.
+
+    Orchestrates Ola Hallengren's IndexOptimize rather than reimplementing
+    it. That procedure is mature and widely deployed, and a second-hand copy
+    would be strictly worse: unfamiliar to every DBA who already runs it, and
+    without its years of accumulated edge cases.
+
+    Requires IndexOptimize to be installed. If it is not, this reports that
+    and stops rather than falling back to something homegrown.
+
+    There are two independent dry runs here. Without --execute this prints
+    the plan and runs nothing. The generated call also carries IndexOptimize's
+    own @Execute = 'N' unless --execute is given, so even a hand-run copy of
+    the printed SQL only prints what it would do.
+    """
+    with ctx.backend() as backend:
+        plan = backend.plan_index_maintenance(
+            databases=databases,
+            min_number_of_pages=min_pages,
+            execute=execute,
+        )
+    _apply(ctx, plan, execute=execute, script=script, assume_yes=True)
+
+
 @main.command("restore-indexes")
 @click.option(
     "--from",
@@ -426,7 +578,7 @@ def restore_indexes(ctx: Context, manifest_path: Path, execute: bool) -> None:
         Operation(target=target, description="restore", sql=stmt, destructive=False)
         for target, stmt in statements
     ]
-    with connect(ctx.dsn, connect_timeout=ctx.timeout, read_only=False) as backend:
+    with connect(ctx.require_dsn(), connect_timeout=ctx.timeout, read_only=False) as backend:
         results = backend.execute(ops)
 
     for op, err in results:
