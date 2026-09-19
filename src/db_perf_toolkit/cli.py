@@ -298,7 +298,7 @@ def _apply(ctx: Context, plan: Plan, *, execute: bool, script: bool, assume_yes:
                 sys.exit(4)
 
     with connect(ctx.dsn, connect_timeout=ctx.timeout, read_only=False) as backend:
-        results = backend.execute(plan.operations)  # type: ignore[attr-defined]
+        results = backend.execute(plan.operations)
 
     failures = [(op, err) for op, err in results if err]
     for op, err in results:
@@ -331,7 +331,7 @@ def vacuum(
     """VACUUM tables carrying dead tuples. Non-destructive."""
     with ctx.backend() as backend:
         tables = backend.bloated_tables(min_dead_pct=min_dead_pct, min_dead_rows=min_dead_rows)
-        plan = backend.plan_vacuum(tables, analyze=not no_analyze)  # type: ignore[attr-defined]
+        plan = backend.plan_vacuum(tables, analyze=not no_analyze)
     _apply(ctx, plan, execute=execute, script=script, assume_yes=True)
 
 
@@ -347,7 +347,7 @@ def reindex(ctx: Context, max_scans: int, execute: bool, script: bool) -> None:
     """
     with ctx.backend() as backend:
         indexes = backend.unused_indexes(max_scans=max_scans)
-        plan = backend.plan_reindex(indexes)  # type: ignore[attr-defined]
+        plan = backend.plan_reindex(indexes)
     _apply(ctx, plan, execute=execute, script=script, assume_yes=True)
 
 
@@ -386,9 +386,7 @@ def drop_unused_indexes(
                 click.secho(str(exc), fg="red", err=True)
                 sys.exit(4)
         indexes = backend.unused_indexes(max_scans=0)
-        plan = backend.plan_drop_unused_indexes(  # type: ignore[attr-defined]
-            indexes, min_size_bytes=min_size_mb * 1024 * 1024
-        )
+        plan = backend.plan_drop_unused_indexes(indexes, min_size_bytes=min_size_mb * 1024 * 1024)
 
     ctx.console.print(render.stats_window_note(window))
     _apply(ctx, plan, execute=execute, script=script, assume_yes=assume_yes)
@@ -429,7 +427,7 @@ def restore_indexes(ctx: Context, manifest_path: Path, execute: bool) -> None:
         for target, stmt in statements
     ]
     with connect(ctx.dsn, connect_timeout=ctx.timeout, read_only=False) as backend:
-        results = backend.execute(ops)  # type: ignore[attr-defined]
+        results = backend.execute(ops)
 
     for op, err in results:
         if err:

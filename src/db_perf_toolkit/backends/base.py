@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from types import TracebackType
+from typing import Self
 
 from db_perf_toolkit.models import (
     BloatedTable,
@@ -16,6 +17,8 @@ from db_perf_toolkit.models import (
     Check,
     IndexFragmentation,
     MissingIndex,
+    Operation,
+    Plan,
     Report,
     SeqScanHotspot,
     SlowQuery,
@@ -100,7 +103,14 @@ class Backend(ABC):
     def bloated_tables(self, min_dead_pct: float, min_dead_rows: int) -> list[BloatedTable]:
         raise self._unsupported(Check.BLOAT)
 
-    def free_space(self, **kwargs: object) -> list[TableFreeSpace]:
+    def free_space(
+        self,
+        *,
+        min_free_pct: float = 20.0,
+        min_table_bytes: int = 0,
+        approx_above_bytes: int = 0,
+        exact: bool = False,
+    ) -> list[TableFreeSpace]:
         raise self._unsupported(Check.FREE_SPACE)
 
     def index_fragmentation(self, min_pct: float, min_pages: int) -> list[IndexFragmentation]:
@@ -108,6 +118,39 @@ class Backend(ABC):
 
     def blocking_chains(self) -> list[BlockingChain]:
         raise self._unsupported(Check.BLOCKING)
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    #
+    # Declared here rather than only on the concrete backends so the CLI can
+    # hold a Backend and still be type-checked. Engines that cannot perform an
+    # operation refuse it exactly as an unsupported check does; nothing here
+    # touches the server, since planning is separate from execution.
+    # ------------------------------------------------------------------
+
+    #: Whether this backend can run maintenance at all.
+    supports_maintenance: bool = False
+
+    def _no_maintenance(self, what: str) -> CheckUnavailable:
+        return CheckUnavailable(
+            what,
+            f"{self.engine} maintenance is not implemented in this backend.",
+            None,
+        )
+
+    def plan_vacuum(self, tables: list[BloatedTable], *, analyze: bool = True) -> Plan:
+        raise self._no_maintenance("vacuum")
+
+    def plan_reindex(self, indexes: list[UnusedIndex]) -> Plan:
+        raise self._no_maintenance("reindex")
+
+    def plan_drop_unused_indexes(
+        self, indexes: list[UnusedIndex], *, min_size_bytes: int = 0
+    ) -> Plan:
+        raise self._no_maintenance("drop-unused-indexes")
+
+    def execute(self, operations: list[Operation]) -> list[tuple[Operation, str | None]]:
+        raise self._no_maintenance("execute")
 
     # ------------------------------------------------------------------
     # Combined run
@@ -159,7 +202,10 @@ class Backend(ABC):
 
         return report
 
-    def __enter__(self) -> Backend:
+    def __enter__(self) -> Self:
+        """Self, not Backend: `with connect_postgres(...) as b` must keep the
+        concrete type, or every PostgreSQL-only attribute becomes invisible to
+        the type checker the moment it passes through a `with`."""
         return self
 
     def __exit__(

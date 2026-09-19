@@ -11,6 +11,7 @@ import psycopg
 import pytest
 
 from db_perf_toolkit.backends import CheckUnavailable, connect
+from db_perf_toolkit.backends.postgres import connect as connect_postgres
 from db_perf_toolkit.render import to_json
 
 pytestmark = pytest.mark.integration
@@ -22,7 +23,9 @@ def test_connection_is_genuinely_read_only(seeded_dsn: str) -> None:
     This tool is pointed at production databases, so a bug in a catalog query
     must not be able to write.
     """
-    with connect(seeded_dsn) as backend:
+    # The concrete backend, because this asserts on the real connection
+    # object — which only the PostgreSQL backend exposes.
+    with connect_postgres(seeded_dsn) as backend:
         conn = backend._conn
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             conn.execute("CREATE TABLE should_never_exist (id int)")

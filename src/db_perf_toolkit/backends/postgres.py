@@ -79,6 +79,8 @@ class PostgresBackend(Backend):
         }
     )
 
+    supports_maintenance = True
+
     def __init__(
         self, conn: psycopg.Connection[dict[str, object]], *, read_only: bool = True
     ) -> None:
@@ -397,7 +399,7 @@ class PostgresBackend(Backend):
                     free_pct=free_pct,
                     method="approx" if use_approx else "exact",
                     scanned_pct=(
-                        float(stat["scanned_percent"])
+                        float(stat["scanned_percent"])  # type: ignore[arg-type]
                         if stat["scanned_percent"] is not None
                         else None
                     ),
@@ -608,7 +610,7 @@ class PostgresBackend(Backend):
         results: list[tuple[Operation, str | None]] = []
         for op in operations:
             try:
-                self._conn.execute(op.sql)  # type: ignore[arg-type]
+                self._conn.execute(op.sql)
                 results.append((op, None))
             except psycopg.Error as exc:
                 results.append((op, str(exc).strip()))

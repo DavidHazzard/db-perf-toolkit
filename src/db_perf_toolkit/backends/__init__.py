@@ -53,12 +53,30 @@ def engine_for_dsn(dsn: str) -> str:
     return key
 
 
-def connect(dsn: str, **kwargs: object) -> Backend:
-    """Open a backend for whichever engine the DSN names."""
+def connect(
+    dsn: str,
+    *,
+    connect_timeout: int = 10,
+    read_only: bool = True,
+    statement_timeout_ms: int | None = None,
+    lock_timeout_ms: int = 10_000,
+) -> Backend:
+    """Open a backend for whichever engine the DSN names.
+
+    The keyword arguments are spelled out rather than forwarded as **kwargs so
+    that a typo becomes a type error here instead of a TypeError three frames
+    down inside a driver.
+    """
     engine = engine_for_dsn(dsn)
+    options = {
+        "connect_timeout": connect_timeout,
+        "read_only": read_only,
+        "statement_timeout_ms": statement_timeout_ms,
+        "lock_timeout_ms": lock_timeout_ms,
+    }
 
     if engine == "postgres":
-        return connect_postgres(dsn, **kwargs)  # type: ignore[arg-type]
+        return connect_postgres(dsn, **options)  # type: ignore[arg-type]
 
     if engine == "sqlserver":
         try:
@@ -70,6 +88,6 @@ def connect(dsn: str, **kwargs: object) -> Backend:
                 "  pip install 'db-perf-toolkit[sqlserver]'\n"
                 "  https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server"
             ) from exc
-        return connect_sqlserver(dsn, **kwargs)  # type: ignore[arg-type,no-any-return]
+        return connect_sqlserver(dsn, **options)  # type: ignore[arg-type]
 
     raise UnknownEngineError(f"No backend registered for {engine!r}")
