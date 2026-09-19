@@ -4,7 +4,7 @@ Every push to `main` and every pull request runs [`.github/workflows/ci.yml`](..
 
 | Job | Blocking | What it does |
 |---|---|---|
-| **Lint** | yes | `uv lock --check`, `ruff check .`, `ruff format --check .` |
+| **Lint** | yes | `uv lock --check`, `ruff check .`, `ruff format --check .`, and one structural check on where SQL Server tests live |
 | **Type check** | yes | `mypy` in strict mode over `src` and `tests` |
 | **Tests (PostgreSQL)** | yes | `pytest -m "not sqlserver"` against a real PostgreSQL 16 container |
 | **Tests (SQL Server)** | yes | `pytest -m sqlserver` against a real SQL Server 2022 container |
@@ -39,17 +39,21 @@ The four jobs run concurrently, so wall time is the slowest job, not the sum. Ti
 
 | Job | Warm | Where it goes |
 |---|---|---|
-| Lint | ~45 s | 15 s runner/checkout/uv setup, 5 s `uv sync`, ~5 s ruff, rest is job startup |
+| Lint | ~45 s | 15 s runner/checkout/uv setup, 5 s `uv sync`, ~5 s ruff and the boundary check, rest is job startup |
 | Type check | ~1 min | 20 s setup and sync, ~25 s mypy on a cold cache |
-| Tests (PostgreSQL) | ~1 min 30 s | 20 s setup, ~15 s pulling `postgres:16` (150 MB), ~5 s container boot, ~15 s for the 33 tests |
-| Tests (SQL Server) | ~2 min 30 s | 20 s setup, ~30 s ODBC driver install, ~40 s cache restore + `docker load`, ~10 s to a server that accepts logins, ~15 s for the suite |
+| Tests (PostgreSQL) | ~1 min 15 s | 20 s setup, ~15 s pulling `postgres:16` (150 MB), then **11 s measured** for container boot and the whole suite — call it ~20 s on a runner |
+| Tests (SQL Server) | ~2 min 30 s | 20 s setup, ~30 s ODBC driver install, ~40 s cache restore + `docker load`, then **19 s measured** for container boot and the whole suite — call it ~40 s on a runner |
+
+The two test figures in bold are measured end-to-end on a developer machine with a warm image, not estimated. The runner figures beside them are those numbers scaled for slower hardware, and are the honest guess in this table.
+
+They should also stay roughly true as the suites grow, because **the container start dominates and every test shares it.** Both suites use a session-scoped fixture, so the SQL Server container's ~9 s to a server that accepts logins is paid once per run, not once per test. Measured directly: going from 59 to 73 SQL Server tests moved the total from 16.5 s to 17.2 s — fourteen more tests against a real server for under a second. The figure to watch is not the test count; it is anything that adds a *second container*, which is why this job must not run under xdist.
 
 **Wall time: roughly 2½–3 minutes**, set by the SQL Server job. A cold run — first push after a dependency bump, or after the image cache is evicted — adds about a minute to that, mostly in the image pull.
 
 Two things keep this honest rather than optimistic:
 
 - `concurrency.cancel-in-progress` kills the previous run when you push again, so a rapid series of pushes costs one run's worth of minutes, not five.
-- The SQL Server job probes for tests before doing any expensive setup (below), so while that suite is still being written the job finishes in ~30 s instead of 2½ minutes.
+- The SQL Server job probes for tests before doing any expensive setup (below). Now that the suite exists that no longer short-circuits anything, but it is what allowed this workflow to be merged before the tests it runs — and it still keeps the job from spending 2½ minutes to discover there is nothing to do.
 
 ## Caching the SQL Server image
 
@@ -121,6 +125,26 @@ No assertion inside the conftest can catch that, because a hook that marks nothi
 
 The other useful property is that this needs no maintenance. There is no flag to flip and nobody has to remember: the guard reads the filesystem, so the moment `tests/sqlserver/test_*.py` lands, tolerance for an empty collection ends by itself.
 
+### The hook's guarantee has a boundary, and the lint job patrols it
+
+Because the marker is applied by path, what the hook actually guarantees is *"everything under `tests/sqlserver/`"* — not *"every SQL Server test"*. Those come apart the moment someone writes a SQL Server test somewhere else. It would go unmarked, `-m "not sqlserver"` would select it, and **the PostgreSQL job would quietly pull a 1.7 GB image and start a SQL Server container** — slow, confusing, and green.
+
+Nothing inside the conftest can prevent that, because the file it would need to notice is outside the package it governs. So the lint job checks the boundary from above:
+
+```bash
+grep -rl 'pyodbc' tests --include='*.py' | grep -v '^tests/sqlserver/'
+```
+
+Any hit fails the build and names the files.
+
+**Why `pyodbc` and not a filename pattern.** Pytest scopes conftest fixtures to their own directory subtree, so a stray test cannot borrow the SQL Server fixtures — asking for one from `tests/` root is an immediate `fixture 'seeded_sqlserver_dsn' not found` at setup, which is loud and harmless. The dangerous file is therefore necessarily *self-contained*: it has to build its own connection, because it cannot borrow one. And a self-contained SQL Server test has to import a driver. That makes `pyodbc` close to a necessary condition for the only form this failure can take, rather than a guess at what a SQL Server test looks like — which is why this is tighter than matching `*sqlserver*` in a filename.
+
+The residual gap, recorded so nobody mistakes it for an oversight: a self-contained test that reaches SQL Server without importing `pyodbc` — driving `sqlcmd` through `subprocess`, say. It is not worth widening the grep for. A check that fires on real cases and is understood beats one that fires on imagined ones and gets disabled the first time it is wrong.
+
+It costs a fraction of a second, runs in the job that needs no Docker, and turns an invariant that held by convention into one that holds because it is checked.
+
+The marker partition is exact today: `-m sqlserver` and `-m "not sqlserver"` sum to the full collection, with no test in both and none in neither. This step is what keeps that true.
+
 ## Two guards against a green run that tested nothing
 
 The SQL Server fixtures `skip` rather than fail when they cannot connect. That is the right behaviour for a developer without SQL Server installed, and exactly the wrong behaviour on CI: a job that skips its entire suite exits 0 and shows a green check. There are two ways to fall into that, and the workflow blocks both.
@@ -183,7 +207,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest -q -m "not sqlserver"
-uv run pytest -q -rs -m sqlserver  # exit 5 means the suite is not there yet
+uv run pytest -q -rs -m sqlserver
 ```
 
 All of these need a working Docker daemon for the test steps, and the SQL Server step additionally needs `msodbcsql18` installed locally. Run the `uv sync` first and keep it: if you reach for `uv run --extra sqlserver pytest` instead, be consistent about it across every command in the shell, or an earlier plain `uv run` can leave `pyodbc` uninstalled and the whole SQL Server package will quietly skip.

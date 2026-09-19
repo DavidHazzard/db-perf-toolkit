@@ -460,6 +460,7 @@ def connect(
     read_only: bool = True,
     statement_timeout_ms: int | None = None,
     lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
+    backend_cls: type[SqlServerBackend] | None = None,
 ) -> SqlServerBackend:
     """Open a connection with timeouts appropriate to what it will do.
 
@@ -515,7 +516,11 @@ def connect(
         # asked for would mislabel every result.
         database = str(cur.fetchone()[0])
 
-    return SqlServerBackend(conn, database=database, host=target.host, read_only=read_only)
+    # backend_cls is how the package composes the check mixins onto this base.
+    # Defaulting to the bare class keeps connection.py independent of them, so
+    # importing it never drags in every check module.
+    cls = backend_cls or SqlServerBackend
+    return cls(conn, database=database, host=target.host, read_only=read_only)
 
 
 def _split_host(hostspec: str) -> tuple[str, int | None]:

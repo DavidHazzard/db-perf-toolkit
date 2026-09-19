@@ -49,6 +49,29 @@ jobs:
       - name: ruff format --check
         run: uv run ruff format --check .
 
+      # ---------------------------------------------------------------------
+      # The `sqlserver` marker is applied by a path-based hook in
+      # tests/sqlserver/conftest.py, so its guarantee is "everything under
+      # tests/sqlserver/" — NOT "every SQL Server test". A SQL Server test
+      # written anywhere else is not marked, which means `-m "not sqlserver"`
+      # selects it and the PostgreSQL job quietly pulls a 1.7 GB image and
+      # starts a SQL Server container.
+      #
+      # That failure is silent and expensive, and no amount of care inside
+      # the conftest can prevent it, because the file it needs to notice is
+      # outside the package it governs. Cheapest reliable signal: a SQL
+      # Server test has to reach the server through pyodbc.
+      # ---------------------------------------------------------------------
+      - name: SQL Server tests must live in tests/sqlserver/
+        run: |
+          stray=$(grep -rl 'pyodbc' tests --include='*.py' | grep -v '^tests/sqlserver/' || true)
+          if [ -n "$stray" ]; then
+            echo "::error title=SQL Server test outside tests/sqlserver/::These files use pyodbc but are not under tests/sqlserver/, so the auto-marking hook will not mark them. They would run in the PostgreSQL job and start a SQL Server container."
+            echo "$stray"
+            exit 1
+          fi
+          echo "No pyodbc usage outside tests/sqlserver/."
+
   types:
     name: Type check
     runs-on: ubuntu-latest
